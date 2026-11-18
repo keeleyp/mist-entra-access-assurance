@@ -1,0 +1,82 @@
+; Mist Access Assurance + Entra ID demo builder.
+; Copy to mist_entra_access_assurance.ini and edit. Mist object names must be
+; 32 characters or fewer (Mist UI limit) - the script checks this before it starts.
+
+[mist]
+; API host for your Mist cloud (manage.gc3.mist.com -> api.gc3.mist.com) and an
+; org admin API token.
+cloud = api.gc3.mist.com
+token = <org admin API token>
+; Only needed if the token has write access to more than one org.
+org_id =
+; Name of the Entra ID identity provider in Mist.
+idp_name = Entra ID
+
+[entra]
+; Tenant to sign in to: a verified domain, xxx.onmicrosoft.com, or the tenant ID.
+; The script shows a device code; sign in as a Global Administrator.
+tenant = contoso.onmicrosoft.com
+; Prefix for the Entra objects (app registrations).
+name_prefix = Mist Access Assurance
+; Security group whose members may use the portals and get Wi-Fi access.
+user_group = Mist WiFi Users
+; Existing users (UPNs, comma separated) added to the group for the demo.
+demo_users = alex@contoso.onmicrosoft.com
+; User realms routed to Entra ID. Blank = all of the tenant's verified domains.
+domains =
+; Make Entra ID the default Access Assurance identity provider.
+default_idp = true
+; Lifetime of the IdP Connector client secret and the SAML signing certs (max 36).
+secret_months = 24
+saml_cert_months = 36
+
+[site]
+; Existing site used for the demo; it is renamed and given the address below.
+; --teardown puts its original name, address and location back.
+current_name = Primary Site
+name = Access Assurance Demo
+address = 1 Canada Square, London E14 5AB, United Kingdom
+country_code = GB
+timezone = Europe/London
+latitude = 51.5049
+longitude = -0.0195
+
+[wlan]
+template_name = Access Assurance - Entra
+; Multi-PSK SSID used by the PSK self-service portal.
+psk_ssid = Corp-PSK
+psk_vlan_id =
+; 802.1X SSID on Mist Access Assurance, used by the certificate portal.
+cert_ssid = Corp-Secure
+cert_vlan_id =
+
+[nac]
+; Blank = "Entra grp: <user_group>" and "EAP-TLS Entra users".
+tag_name =
+rule_name = EAP-TLS Entra users
+
+[psk_portal]
+name = PSK Self-Service
+expire_days = 365
+; Devices per PSK (0 = unlimited).
+max_usage = 5
+passphrase_length = 12
+
+[cert_portal]
+name = Certificate Onboarding
+cert_expire_days = 365
+; wpa2 or wpa3
+eap_type = wpa2
+; wireless or wireless+wired
+access_type = wireless
+
+[output]
+; Word report with QR codes for both portals. Relative paths are next to this ini.
+report = Mist_Access_Assurance_Demo_Report.docx
+
+[network]
+; Optional - for Zscaler / corporate proxies.
+; ca_bundle = /path/to/zscaler-root.pem
+; verify_ssl = true
+; http_proxy = http://proxy:8080
+; https_proxy = http://proxy:8080

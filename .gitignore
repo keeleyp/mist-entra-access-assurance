@@ -1,0 +1,9 @@
+*.ini
+!mist_entra_access_assurance.ini.example
+.msal_token_cache.json
+__pycache__/
+.DS_Store
+*.state.json
+*.state.restored-*.json
+*.docx
+cert_portal_qr.png
