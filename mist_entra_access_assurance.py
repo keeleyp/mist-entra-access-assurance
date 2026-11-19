@@ -94,6 +94,62 @@ def _c(code, text):
     return f"\033[{code}m{text}\033[0m" if COLOR else text
 
 
+# One timestamp per run, shared by the Word report and the audit log file names.
+RUN_TS = datetime.now()
+AUDIT_LOG = None
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+class _Tee:
+    """Copy everything printed to the screen into the audit log, without colours and
+    with a time on every line."""
+
+    def __init__(self, real, fh):
+        self.real, self.fh, self.bol = real, fh, True
+
+    def write(self, s):
+        self.real.write(s)
+        for part in _ANSI.sub("", s).splitlines(keepends=True):
+            if self.bol:
+                self.fh.write(datetime.now().strftime("%H:%M:%S  "))
+            self.fh.write(part)
+            self.bol = part.endswith("\n")
+        self.fh.flush()
+        return len(s)
+
+    def flush(self):
+        self.real.flush()
+        self.fh.flush()
+
+    def isatty(self):
+        return self.real.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def stamped(path, ts=RUN_TS):
+    """Report.docx -> Report_20261119-143005.docx"""
+    base, ext = os.path.splitext(path)
+    return f"{base}_{ts:%Y%m%d-%H%M%S}{ext}"
+
+
+def start_audit_log(cfg, ini_path, mode, argv):
+    p = cfg.get("output", "audit_log", fallback="").strip() if cfg.has_section("output") else ""
+    p = os.path.expanduser(p or "Mist_Access_Assurance_Audit.log")
+    if not os.path.isabs(p):
+        p = os.path.join(os.path.dirname(os.path.abspath(ini_path)), p)
+    base, ext = os.path.splitext(p)
+    path = f"{base}_{RUN_TS:%Y%m%d-%H%M%S}_{mode}{ext or '.log'}"
+    fh = open(path, "w", encoding="utf-8")
+    fh.write(f"Mist Access Assurance + Entra ID demo - audit log\n"
+             f"Run:     {mode}\nStarted: {RUN_TS:%Y-%m-%d %H:%M:%S} {time.strftime('%Z')}\n"
+             f"Ini:     {os.path.abspath(ini_path)}\nCommand: {' '.join(argv)}\n{'=' * 72}\n")
+    sys.stdout = _Tee(sys.stdout, fh)
+    sys.stderr = _Tee(sys.stderr, fh)
+    return path
+
+
 GOOD = {"created", "enabled", "granted", "assigned", "set", "updated", "renamed", "added",
         "deleted", "removed", "restored", "disabled", "purged", "revoked"}
 
@@ -130,6 +186,8 @@ class Run:
             sym, col = "•", "2"
         elif status.startswith("would"):
             sym, col = "○", "33"
+        elif status == "note":
+            sym, col = "i", "33"
         else:
             sym, col = "!", "31"
         line = f"   {_c(col, sym)} {_c(col, status.ljust(9))} {kind}: {_c('1', name)}"
@@ -847,12 +905,32 @@ def step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry):
 
 
 # --------------------------------------------------------------------------- build
+RADIUS_WARMUP = (
+    "On an org that has never run Access Assurance, the first 802.1X request makes Mist build the "
+    "org's cloud RADIUS service, which takes about 10 minutes. Until then, joins fail with "
+    "'Radius Server Failed to respond (514) / RadSec Connection Failure (515)' and Access "
+    "Assurance logs nothing. It happens once per org: after it works, a teardown and rebuild on the "
+    "same org authenticates straight away. Tip: make one join attempt on {ssid} about 10 minutes "
+    "before the demo.")
+
+
+def radius_ready(mist):
+    """True if Access Assurance has handled traffic for this org recently (its cloud RADIUS
+    service is built), False if not, None if it can't be checked."""
+    try:
+        r = mist.req("GET", f"{mist.org}/nac_clients/events/search?duration=30d&limit=1")
+        return bool(r.get("total") or r.get("results"))
+    except (BuildError, requests.RequestException):
+        return None
+
+
 def report_path(cfg, ini_path):
     p = cfg.get("output", "report", fallback="").strip() if cfg.has_section("output") else ""
     if not p:
         p = "Mist_Access_Assurance_Demo_Report.docx"
     p = os.path.expanduser(p)
-    return p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(ini_path)), p)
+    p = p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(ini_path)), p)
+    return stamped(p)
 
 
 def build(cfg, mist, g, session, args):
@@ -871,10 +949,16 @@ def build(cfg, mist, g, session, args):
     site = find_site(mist, cfg, n)
     log("exists", "Entra ID tenant", org.get("displayName", ""), tenant_id)
     log("exists", "Mist organisation", org_name, f"{mist.org_id} on {mist.cloud}")
-    if dry:
-        log("would save", "snapshot", os.path.basename(STATE.path))
-    elif STATE.exists:
+    warm = radius_ready(mist)
+    if warm:
+        log("exists", "Access Assurance cloud RADIUS", "ready", "NAC traffic seen in the last 30 days")
+    elif warm is False:
+        log("note", "Access Assurance cloud RADIUS", "no NAC traffic on this org yet",
+            "the first 802.1X request starts a one-off ~10 minute build")
+    if STATE.exists:
         log("exists", "snapshot", os.path.basename(STATE.path), "kept from the first build")
+    elif dry:
+        log("would save", "snapshot", os.path.basename(STATE.path))
     else:
         setting = mist.req("GET", f"{mist.org}/setting")
         STATE.start({
@@ -960,12 +1044,18 @@ def build(cfg, mist, g, session, args):
              "how": "Sign in with Entra ID, install the Marvis Client app, then tap Install Network Profile."},
         ],
         "stages": stages, "started": datetime.fromisoformat(STATE.data["first_build"]),
+        "radius_note": None if warm else RADIUS_WARMUP.format(ssid=n["cert_ssid"]),
         "finished": datetime.now(),
     })
     print(_c("1;32", "━━ Demo environment ready " + "━" * 40))
     print(f"   PSK portal:          {psk.get('ui_url', '-')}")
     print(f"   Certificate portal:  {cert_portal.get('ui_url', '-')}")
     print(f"   Report with QR codes: {out}")
+    print(f"   Audit log:            {AUDIT_LOG}")
+    if not warm:
+        import textwrap
+        print(_c("33", "\n" + textwrap.fill(RADIUS_WARMUP.format(ssid=n["cert_ssid"]), 92,
+                                             initial_indent="   i ", subsequent_indent="     ")))
     print(_c("2", "   Undo everything with:  python3 mist_entra_access_assurance.py --teardown"))
 
 
@@ -1075,11 +1165,12 @@ def teardown(cfg, mist, g, args):
     done = STATE.finish()
     print(_c("1;32", "\n━━ Org and tenant restored to their pre-demo state " + "━" * 15))
     print(_c("2", f"   Snapshot archived as {os.path.basename(done)}"))
+    print(_c("2", f"   Audit log: {AUDIT_LOG}"))
 
 
 # --------------------------------------------------------------------------- main
 def main():
-    global STATE
+    global STATE, AUDIT_LOG
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ini", default=DEFAULT_INI)
     ap.add_argument("--dry-run", action="store_true", help="read only; show what would be built")
@@ -1092,6 +1183,9 @@ def main():
     try:
         cfg = load_config(args.ini)
         names(cfg)  # fail fast on over-long Mist names
+        AUDIT_LOG = start_audit_log(cfg, args.ini, "teardown" if args.teardown else
+                                    "dry-run" if args.dry_run else "build", sys.argv)
+        print(_c("2", f"Audit log: {AUDIT_LOG}"))
         STATE = State(os.path.splitext(os.path.abspath(args.ini))[0] + ".state.json", dry=args.dry_run)
         session = build_session(cfg)
         cloud, token = mist_credentials(cfg)

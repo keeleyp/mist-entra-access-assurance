@@ -7,3 +7,4 @@ __pycache__/
 *.state.restored-*.json
 *.docx
 cert_portal_qr.png
+*.log

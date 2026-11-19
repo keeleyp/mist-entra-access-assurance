@@ -99,7 +99,8 @@ def _setup(doc):
 def write_report(path, ctx):
     """ctx keys: tenant_name, tenant_id, org_name, org_id, cloud, site{name,address},
     psk_ssid, cert_ssid, group, demo_users, portals[{title,url,ssid,how}],
-    stages[{title,explain,secs,events[(status,kind,name,extra)]}], started, finished"""
+    stages[{title,explain,secs,events[(status,kind,name,extra)]}], started, finished,
+    radius_note (optional)"""
     doc = Document()
     _setup(doc)
 
@@ -169,6 +170,10 @@ def write_report(path, ctx):
             doc.add_paragraph("No changes were needed.")
 
     doc.add_heading("Notes", level=1)
+    if ctx.get("radius_note"):
+        p = doc.add_paragraph(style="List Bullet")
+        p.add_run("First use of Access Assurance on this org: ").bold = True
+        p.add_run(ctx["radius_note"])
     for line in (
         "Username/password (EAP-TTLS) uses the Entra ROPC flow, which skips MFA. Exclude the "
         "Mist Access Assurance source IPs from Conditional Access MFA, or use certificates only.",

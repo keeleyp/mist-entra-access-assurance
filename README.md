@@ -22,6 +22,13 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 
 When the build finishes, it writes a **Word report** with both portal QR codes and every action taken.
 
+Every run (build, dry-run or teardown) also writes an **audit log**: the same output as the screen, without colours and with a time on each line. Both file names carry the run's timestamp, so each run keeps its own copy:
+
+- `Mist_Access_Assurance_Demo_Report_20261119-143005.docx`
+- `Mist_Access_Assurance_Audit_20261119-143005_build.log`
+
+Set the base names under `[output]` in the ini.
+
 ## Setup
 
 ```bash
@@ -64,6 +71,7 @@ Objects the build didn't create are never touched. The snapshot is archived as `
 
 ## Demo tips
 
+- **On an org that has never run Access Assurance, allow 10 minutes after the first join attempt.** The first 802.1X request makes Mist build the org's cloud RADIUS service, which takes about 10 minutes. Until then, joins to the 802.1X SSID fail with "Radius Server Failed to respond (514) / RadSec Connection Failure (515)" and Access Assurance logs nothing. This happens once per org: after it works, a teardown and rebuild on the same org authenticates straight away. Step 1 of the build tells you if the org has no Access Assurance traffic yet. Before the demo, make one join attempt on the 802.1X SSID to start the build.
 - If a phone or browser was used in an earlier demo, open the portal links in a **new private tab**. The portals reuse a cached sign-in that belongs to the previous (deleted) portal, which makes the page blank or makes the Marvis app fail with "failed to get user profile data".
 - The PSK portal fills the PSK's email field from the Entra sign-in, but no email is sent: notifications are off and no email is asked for. The portal's "Email Passphrase" button only sends if someone presses it.
 - EAP-TTLS (username/password) uses ROPC, which skips MFA. Exclude the Mist Access Assurance source IPs from Conditional Access MFA, or use certificates only.

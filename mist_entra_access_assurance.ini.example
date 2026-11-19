@@ -71,8 +71,13 @@ eap_type = wpa2
 access_type = wireless
 
 [output]
-; Word report with QR codes for both portals. Relative paths are next to this ini.
+; Relative paths are next to this ini. Each run adds a timestamp to the name, e.g.
+; Mist_Access_Assurance_Demo_Report_20261119-143005.docx
+; Word report with QR codes for both portals (written by each build).
 report = Mist_Access_Assurance_Demo_Report.docx
+; Everything shown on screen, with a time on each line (written by every run;
+; the name also says build, dry-run or teardown).
+audit_log = Mist_Access_Assurance_Audit.log
 
 [network]
 ; Optional - for Zscaler / corporate proxies.
