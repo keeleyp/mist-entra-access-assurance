@@ -40,6 +40,11 @@ country_code = GB
 timezone = Europe/London
 latitude = 51.5049
 longitude = -0.0195
+; Floorplan image uploaded to the site as a map (blank = none). Relative paths are
+; next to this ini. floorplan_ppm = image pixels per metre (the sample is 50).
+floorplan = sample_office_floorplan.png
+floorplan_name = Ground Floor
+floorplan_ppm = 50
 
 [wlan]
 ; Each SSID gets its own WLAN template; both are applied to the demo site.

@@ -151,7 +151,7 @@ def start_audit_log(cfg, ini_path, mode, argv):
     return path
 
 
-GOOD = {"created", "enabled", "granted", "assigned", "set", "updated", "renamed", "added",
+GOOD = {"created", "uploaded", "enabled", "granted", "assigned", "set", "updated", "renamed", "added",
         "deleted", "removed", "restored", "disabled", "purged", "revoked"}
 
 
@@ -281,10 +281,11 @@ def names(cfg):
     # One WLAN template per SSID, both applied to the demo site.
     n["psk_template"] = cfg["wlan"].get("psk_template", "").strip() or f"Access Assurance - {n['psk_ssid']}"
     n["cert_template"] = cfg["wlan"].get("cert_template", "").strip() or f"Access Assurance - {n['cert_ssid']}"
+    n["floorplan"] = cfg["site"].get("floorplan_name", "").strip() or "Ground Floor"
     if n["psk_template"] == n["cert_template"]:
         raise BuildError("[wlan] psk_template and cert_template must be different names")
     too_long = [f"{k} '{n[k]}' ({len(n[k])})" for k in
-                ("mist_idp", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
+                ("mist_idp", "floorplan", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
                  "psk_portal", "cert_portal")
                 if len(n[k]) > MIST_NAME_MAX]
     if too_long:
@@ -498,6 +499,40 @@ def step_site(mist, cfg, n, site, dry):
     if rest:
         log("set", "site location", n["site"], ", ".join(rest))
     return site
+
+
+def step_floorplan(mist, cfg, n, site, ini_path, dry):
+    """Upload the floorplan image as a map on the demo site ([site] floorplan)."""
+    s = cfg["site"]
+    path = os.path.expanduser(s.get("floorplan", "").strip())
+    if not path:
+        return
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.abspath(ini_path)), path)
+    if not os.path.isfile(path):
+        raise BuildError(f"[site] floorplan: {path} not found")
+    from PIL import Image
+    with Image.open(path) as im:
+        width, height = im.size
+    ppm = float(s.get("floorplan_ppm", "").strip() or 50)
+    size = f"{width / ppm:.0f} m x {height / ppm:.0f} m, {ppm:g} px = 1 m"
+    if site.get("id") and any(m.get("name") == n["floorplan"]
+                              for m in mist.req("GET", f"{mist.base}/sites/{site['id']}/maps")):
+        log("exists", "floorplan", n["floorplan"])
+        return
+    if dry:
+        log("would upload", "floorplan", n["floorplan"], f"{os.path.basename(path)}, {size}")
+        return
+    m = mist.req("POST", f"{mist.base}/sites/{site['id']}/maps",
+                 {"name": n["floorplan"], "type": "image", "width": width, "height": height, "ppm": ppm})
+    STATE.record("mist", "maps", m["id"], n["floorplan"], site_id=site["id"])
+    with open(path, "rb") as f:
+        r = mist.s.post(f"{mist.base}/sites/{site['id']}/maps/{m['id']}/image", headers=mist.h,
+                        files={"file": (os.path.basename(path), f, "image/png" if path.lower().endswith(".png")
+                                        else "image/jpeg")}, timeout=120)
+    if not r.ok:
+        raise BuildError(f"Mist floorplan image upload -> {r.status_code}: {r.text[:300]}")
+    log("uploaded", "floorplan", n["floorplan"], f"{os.path.basename(path)}, {size}")
 
 
 # --------------------------------------------------------------------------- Entra steps
@@ -990,8 +1025,10 @@ def build(cfg, mist, g, session, args):
         })
         log("set", "snapshot", os.path.basename(STATE.path), "used by --teardown to restore everything")
 
-    RUN.stage("Prepare the demo site", "Rename the site and set its address so the demo looks real.")
+    RUN.stage("Prepare the demo site",
+              "Rename the site, set its address and upload its floorplan so the demo looks real.")
     site = step_site(mist, cfg, n, site, dry)
+    step_floorplan(mist, cfg, n, site, args.ini, dry)
 
     RUN.stage("Entra ID: register Mist as an application",
               "Mist Access Assurance needs an Entra app to read users, groups and devices via Microsoft Graph.")
@@ -1122,7 +1159,7 @@ def teardown(cfg, mist, g, args):
         return
 
     RUN = Run(4, pause=args.pause)
-    RUN.stage("Mist: remove demo configuration", "Portals, policy, SSIDs, WLAN templates and identity provider.")
+    RUN.stage("Mist: remove demo configuration", "Portals, policy, SSIDs, WLAN templates, identity provider and floorplan.")
     for p in org_psks:
         mist.delete("psks", p["id"])
         log("deleted", "PSK", p["name"])
@@ -1132,10 +1169,13 @@ def teardown(cfg, mist, g, args):
         mist.req("PUT", f"{mist.org}/setting", {"mist_nac": nac})
         log("restored", "Access Assurance IdP settings", "realm mapping / default IdP")
     for c in reversed([c for c in created if c["system"] == "mist"]):
-        mist.delete(c["kind"], c["id"])
+        if c["kind"] == "maps":
+            mist.req("DELETE", f"{mist.base}/sites/{c['site_id']}/maps/{c['id']}", ok404=True)
+        else:
+            mist.delete(c["kind"], c["id"])
         log("deleted", {"ssos": "identity provider", "templates": "WLAN template", "wlans": "SSID",
                         "nactags": "NAC label", "nacrules": "auth policy rule", "pskportals": "PSK portal",
-                        "nacportals": "certificate portal"}.get(c["kind"], c["kind"]), c["name"])
+                        "nacportals": "certificate portal", "maps": "floorplan"}.get(c["kind"], c["kind"]), c["name"])
 
     RUN.stage("Mist: restore the internal CA and site", "Put the CA and the site back exactly as they were.")
     if not ca_was:

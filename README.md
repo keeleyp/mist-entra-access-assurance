@@ -9,7 +9,7 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 | Step | What happens |
 |---|---|
 | 1. Connect | Signs in to Entra ID and Mist, and saves a snapshot of the starting state |
-| 2. Demo site | Renames the site and sets its address, country, timezone and location from the ini |
+| 2. Demo site | Renames the site, sets its address, country, timezone and location from the ini, and uploads its floorplan |
 | 3. Entra app | **IdP Connector** app registration with Graph `User.Read` (delegated) and `User.Read.All`, `GroupMember.Read.All`, `Device.Read.All` (application). Grants admin consent and turns on public client flows (ROPC / EAP-TTLS) |
 | 4. Entra group | Onboarding security group, with the demo users added |
 | 5. Mist IdP | OAuth/Azure identity provider using a fresh client secret (never shown), plus realm mapping and the default IdP |
@@ -41,6 +41,7 @@ In the ini, set:
 - the Entra `tenant` and `demo_users`
 - the SSID names
 - the site's `current_name`, plus the new name and address
+- the site's floorplan image (`floorplan`, with its scale in pixels per metre as `floorplan_ppm`). `sample_office_floorplan.png` is included: a 40 × 25 m office at 50 px = 1 m, with a 24-seat meeting room and 10 two-desk offices
 
 Mist object names must be **32 characters or fewer** (Mist UI limit). The script checks this before it starts.
 
@@ -63,6 +64,7 @@ Entra sign-in uses a device code. Sign in as a Global Administrator. The token i
 The snapshot, `<ini>.state.json`, is written before the first change. Teardown then does the following:
 
 - Deletes every Mist object the build created, plus any PSKs issued on the demo PSK SSID.
+- Deletes the uploaded floorplan.
 - Restores the org's Access Assurance IdP settings and the site's original name, address, country, timezone and location.
 - Turns the internal CA back off if it was off before. This removes every certificate it issued. If the CA was already on, teardown keeps it and restores its providers.
 - Deletes the Entra app registrations, SAML apps, policies and group (if the build created it), and purges them from the Entra recycle bin. Demo users added to a group that already existed are removed from it.
