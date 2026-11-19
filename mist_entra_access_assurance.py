@@ -7,7 +7,8 @@ Builds, step by step with an explanation on screen for each stage:
   * Entra onboarding group (+ demo users)
   * Mist OAuth/Azure identity provider + realm mapping
   * Mist internal (onboard) CA for BYOD certificates
-  * Mist WLAN template with a Multi-PSK SSID and an 802.1X SSID on Mist NAC
+  * a Multi-PSK SSID and an 802.1X SSID on Mist NAC, each in its own WLAN template,
+    both applied to the demo site
   * Mist NAC tag + rule (EAP-TLS + Entra group -> allow)
   * Entra SAML policies (sign whole response; NameID = UPN in email format)
   * PSK self-service portal and certificate onboarding portal, each with an Entra SAML app
@@ -269,7 +270,6 @@ def names(cfg):
         "entra_psk_app": f"{prefix} PSK Portal",
         "entra_cert_app": f"{prefix} Cert Portal",
         "mist_idp": cfg["mist"].get("idp_name", "").strip() or "Entra ID",
-        "template": cfg["wlan"].get("template_name", "").strip() or "Access Assurance - Entra",
         "psk_ssid": cfg["wlan"]["psk_ssid"].strip(),
         "cert_ssid": cfg["wlan"]["cert_ssid"].strip(),
         "nac_tag": cfg["nac"].get("tag_name", "").strip() or f"Entra grp: {e['user_group'].strip()}",
@@ -278,8 +278,13 @@ def names(cfg):
         "cert_portal": cfg["cert_portal"].get("name", "").strip() or "Certificate Onboarding",
         "site": cfg["site"]["name"].strip(),
     }
+    # One WLAN template per SSID, both applied to the demo site.
+    n["psk_template"] = cfg["wlan"].get("psk_template", "").strip() or f"Access Assurance - {n['psk_ssid']}"
+    n["cert_template"] = cfg["wlan"].get("cert_template", "").strip() or f"Access Assurance - {n['cert_ssid']}"
+    if n["psk_template"] == n["cert_template"]:
+        raise BuildError("[wlan] psk_template and cert_template must be different names")
     too_long = [f"{k} '{n[k]}' ({len(n[k])})" for k in
-                ("mist_idp", "template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
+                ("mist_idp", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
                  "psk_portal", "cert_portal")
                 if len(n[k]) > MIST_NAME_MAX]
     if too_long:
@@ -797,43 +802,58 @@ def step_internal_ca(mist, dry):
     log("enabled", "internal CA", "Onboard CA", "issues client certificates to onboarded devices")
 
 
-def step_wlans(mist, cfg, n, site, dry):
-    w = cfg["wlan"]
-    applies = {"site_ids": [site["id"]]}
-    tmpl = mist.find("templates", n["template"])
+def wlan_template(mist, name, site, site_name, dry):
+    """Find or create a WLAN template and make sure it applies to the demo site."""
+    tmpl = mist.find("templates", name)
     if tmpl:
-        log("exists", "WLAN template", n["template"])
-        if not dry and site["id"] not in tmpl.get("applies", {}).get("site_ids", []):
-            ids = tmpl.get("applies", {}).get("site_ids", []) + [site["id"]]
-            tmpl = mist.update("templates", tmpl["id"], {"applies": {"site_ids": ids}})
-            log("updated", "WLAN template", n["template"], f"applied to {n['site']}")
-    elif dry:
-        log("would create", "WLAN template", n["template"], f"applied to {n['site']}")
-        tmpl = {"id": DRY}
-    else:
-        tmpl = mist.create("templates", {"name": n["template"], "applies": applies})
-        STATE.record("mist", "templates", tmpl["id"], n["template"])
-        log("created", "WLAN template", n["template"], f"applied to {n['site']}")
+        log("exists", "WLAN template", name)
+        ids = tmpl.get("applies", {}).get("site_ids", [])
+        if not dry and site["id"] not in ids:
+            tmpl = mist.update("templates", tmpl["id"], {"applies": {"site_ids": ids + [site["id"]]}})
+            log("updated", "WLAN template", name, f"applied to {site_name}")
+        return tmpl
+    if dry:
+        log("would create", "WLAN template", name, f"applied to {site_name}")
+        return {"id": DRY}
+    tmpl = mist.create("templates", {"name": name, "applies": {"site_ids": [site["id"]]}})
+    STATE.record("mist", "templates", tmpl["id"], name)
+    log("created", "WLAN template", name, f"applied to {site_name}")
+    return tmpl
 
-    existing = [x for x in mist.list("wlans") if x.get("template_id") == tmpl["id"]]
 
-    def wlan(ssid, auth, vlan, extra, explain):
-        body = {"ssid": ssid, "enabled": True, "template_id": tmpl["id"], "auth": auth, **extra}
-        if vlan:
-            body.update({"vlan_enabled": True, "vlan_id": vlan})
-        if any(x.get("ssid") == ssid for x in existing):
-            log("exists", "SSID", ssid)
+def step_wlans(mist, cfg, n, site, dry):
+    """Each SSID gets its own WLAN template; both templates apply to the demo site."""
+    w = cfg["wlan"]
+    if w.get("template_name", "").strip():
+        log("note", "ini [wlan] template_name", w["template_name"].strip(),
+            "no longer used - each SSID now has its own template (psk_template / cert_template)")
+    wlans = mist.list("wlans")
+    templates = {t["id"]: t["name"] for t in mist.list("templates")}
+    for ssid, tname in ((n["psk_ssid"], n["psk_template"]), (n["cert_ssid"], n["cert_template"])):
+        elsewhere = [templates.get(x["template_id"], x["template_id"]) for x in wlans
+                     if x.get("ssid") == ssid and x.get("template_id") and templates.get(x["template_id"]) != tname]
+        if elsewhere:
+            raise BuildError(f"SSID {ssid} already exists in WLAN template '{elsewhere[0]}' - run --teardown "
+                             f"first (e.g. a build from an older version), or rename the SSID in the ini")
+
+    def wlan(ssid, tname, auth, vlan, extra, explain):
+        tmpl = wlan_template(mist, tname, site, n["site"], dry)
+        if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in wlans):
+            log("exists", "SSID", ssid, f"in {tname}")
             return
         if dry:
             log("would create", "SSID", ssid, explain)
             return
+        body = {"ssid": ssid, "enabled": True, "template_id": tmpl["id"], "auth": auth, **extra}
+        if vlan:
+            body.update({"vlan_enabled": True, "vlan_id": vlan})
         obj = mist.create("wlans", body)
         STATE.record("mist", "wlans", obj["id"], ssid)
         log("created", "SSID", ssid, explain)
 
-    wlan(n["psk_ssid"], {"type": "psk", "multi_psk_only": True}, int_or_none(w.get("psk_vlan_id")), {},
-         "WPA2 Multi-PSK - every user gets their own passphrase")
-    wlan(n["cert_ssid"], {"type": "eap"}, int_or_none(w.get("cert_vlan_id")),
+    wlan(n["psk_ssid"], n["psk_template"], {"type": "psk", "multi_psk_only": True},
+         int_or_none(w.get("psk_vlan_id")), {}, "WPA2 Multi-PSK - every user gets their own passphrase")
+    wlan(n["cert_ssid"], n["cert_template"], {"type": "eap"}, int_or_none(w.get("cert_vlan_id")),
          {"auth_servers": [], "mist_nac": {"enabled": True}},
          "WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance")
 
@@ -990,7 +1010,8 @@ def build(cfg, mist, g, session, args):
     step_internal_ca(mist, dry)
 
     RUN.stage("Mist: create the SSIDs",
-              f"{n['psk_ssid']} uses a personal passphrase per user; {n['cert_ssid']} uses certificates (802.1X).")
+              f"{n['psk_ssid']} uses a personal passphrase per user; {n['cert_ssid']} uses certificates (802.1X). "
+              "Each SSID has its own WLAN template, and both are applied to the demo site.")
     step_wlans(mist, cfg, n, site, dry)
 
     RUN.stage("Mist: authentication policy",
@@ -1101,7 +1122,7 @@ def teardown(cfg, mist, g, args):
         return
 
     RUN = Run(4, pause=args.pause)
-    RUN.stage("Mist: remove demo configuration", "Portals, policy, SSIDs, template and identity provider.")
+    RUN.stage("Mist: remove demo configuration", "Portals, policy, SSIDs, WLAN templates and identity provider.")
     for p in org_psks:
         mist.delete("psks", p["id"])
         log("deleted", "PSK", p["name"])

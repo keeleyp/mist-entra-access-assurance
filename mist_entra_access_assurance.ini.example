@@ -42,7 +42,10 @@ latitude = 51.5049
 longitude = -0.0195
 
 [wlan]
-template_name = Access Assurance - Entra
+; Each SSID gets its own WLAN template; both are applied to the demo site.
+; Blank = "Access Assurance - <ssid>".
+psk_template =
+cert_template =
 ; Multi-PSK SSID used by the PSK self-service portal.
 psk_ssid = Corp-PSK
 psk_vlan_id =
