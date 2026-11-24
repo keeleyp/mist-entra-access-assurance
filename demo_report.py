@@ -120,7 +120,8 @@ def write_report(path, ctx):
         ("Mist organisation", f"{ctx['org_name']}  ({ctx['org_id']})"),
         ("Mist cloud", ctx["cloud"]),
         ("Demo site", f"{ctx['site']['name']} — {ctx['site'].get('address') or ''}"),
-        ("SSIDs", f"{ctx['psk_ssid']} (Multi-PSK)   ·   {ctx['cert_ssid']} (802.1X EAP-TLS)"),
+        ("SSIDs", f"{ctx['psk_ssid']} (Multi-PSK)   ·   {ctx['cert_ssid']} (802.1X EAP-TLS)"
+                  + (f"   ·   {ctx['or_ssid']} (OpenRoaming / Passpoint)" if ctx.get("or_ssid") else "")),
         ("Onboarding group", f"{ctx['group']}  (members: {', '.join(ctx['demo_users']) or 'none added'})"),
         ("Build time", f"{ctx['started']:%H:%M:%S} – {ctx['finished']:%H:%M:%S}"),
     ], [45, 129])

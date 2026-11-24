@@ -16,9 +16,10 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 | 6. Internal CA | Turns on the Mist onboard CA for BYOD certificates |
 | 7. SSIDs | A Multi-PSK SSID and an 802.1X SSID on Mist NAC, each in its own WLAN template. Both templates are applied to the demo site |
 | 8. Auth policy | NAC label (Entra group) and the rule *EAP-TLS + group → allow* |
-| 9. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
-| 10. PSK portal | BYOD self-service portal with Entra SSO and no email collection or notifications, plus its SAML app |
-| 11. Cert portal | Marvis Client certificate onboarding portal with Entra SSO, plus its SAML app |
+| 9. OpenRoaming | A Passpoint (Hotspot 2.0) 802.1X SSID in its own WLAN template, an OpenRoaming identity provider for it, and the rule *SSID → allow* (an SSID-match NAC label). Turn off with `[openroaming] enabled = false` |
+| 10. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
+| 11. PSK portal | BYOD self-service portal with Entra SSO and no email collection or notifications, plus its SAML app |
+| 12. Cert portal | Marvis Client certificate onboarding portal with Entra SSO, plus its SAML app |
 
 When the build finishes, it writes a **Word report** with both portal QR codes and every action taken.
 
@@ -41,7 +42,7 @@ In the ini, set:
 - the Entra `tenant` and `demo_users`
 - the SSID names
 - the site's `current_name`, plus the new name and address
-- the site's floorplan image (`floorplan`, with its scale in pixels per metre as `floorplan_ppm`). `sample_office_floorplan.png` is included: a 40 × 25 m office at 50 px = 1 m, with a 24-seat meeting room and 10 two-desk offices
+- the site's floorplan image. Leave `floorplan` blank to use the included AI-generated `sample_office_floorplan.png` (a 40 × 25 m office at 50 px = 1 m, with a 24-seat meeting room and 10 two-desk offices). To use your own plan, set `floorplan` to its path and `floorplan_ppm` to its scale in pixels per metre. Set `floorplan = none` for no floorplan
 
 Mist object names must be **32 characters or fewer** (Mist UI limit). The script checks this before it starts.
 

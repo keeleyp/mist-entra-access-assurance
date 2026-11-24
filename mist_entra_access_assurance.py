@@ -282,12 +282,25 @@ def names(cfg):
     n["psk_template"] = cfg["wlan"].get("psk_template", "").strip() or f"Access Assurance - {n['psk_ssid']}"
     n["cert_template"] = cfg["wlan"].get("cert_template", "").strip() or f"Access Assurance - {n['cert_ssid']}"
     n["floorplan"] = cfg["site"].get("floorplan_name", "").strip() or "Ground Floor"
-    if n["psk_template"] == n["cert_template"]:
-        raise BuildError("[wlan] psk_template and cert_template must be different names")
-    too_long = [f"{k} '{n[k]}' ({len(n[k])})" for k in
-                ("mist_idp", "floorplan", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
-                 "psk_portal", "cert_portal")
-                if len(n[k]) > MIST_NAME_MAX]
+    # Optional OpenRoaming SSID ([openroaming] enabled = true)
+    o = cfg["openroaming"] if cfg.has_section("openroaming") else {}
+    n["or_enabled"] = cfg.getboolean("openroaming", "enabled", fallback=False)
+    n["or_ssid"] = (o.get("ssid", "") or "").strip() or "OpenRoaming"
+    n["or_template"] = (o.get("template", "") or "").strip() or f"Access Assurance - {n['or_ssid']}"
+    n["or_idp"] = (o.get("idp_name", "") or "").strip() or "OpenRoaming"
+    n["or_tag"] = (o.get("tag_name", "") or "").strip() or f"SSID: {n['or_ssid']}"
+    n["or_rule"] = (o.get("rule_name", "") or "").strip() or "OpenRoaming SSID"
+    templates = [n["psk_template"], n["cert_template"]] + ([n["or_template"]] if n["or_enabled"] else [])
+    if len(set(templates)) != len(templates):
+        raise BuildError("WLAN template names must all be different ([wlan] psk_template / cert_template, "
+                         "[openroaming] template)")
+    if n["or_enabled"] and n["or_ssid"] in (n["psk_ssid"], n["cert_ssid"]):
+        raise BuildError("[openroaming] ssid must differ from the PSK and 802.1X SSIDs")
+    keys = ["mist_idp", "floorplan", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
+            "psk_portal", "cert_portal"]
+    if n["or_enabled"]:
+        keys += ["or_ssid", "or_template", "or_idp", "or_tag", "or_rule"]
+    too_long = [f"{k} '{n[k]}' ({len(n[k])})" for k in keys if len(n[k]) > MIST_NAME_MAX]
     if too_long:
         raise BuildError(f"Mist names must be <= {MIST_NAME_MAX} characters - shorten in the ini: "
                          + "; ".join(too_long))
@@ -501,20 +514,38 @@ def step_site(mist, cfg, n, site, dry):
     return site
 
 
+DEFAULT_FLOORPLAN = os.path.join(HERE, "sample_office_floorplan.png")  # AI-generated 40 x 25 m office
+DEFAULT_FLOORPLAN_PPM = 50
+
+
 def step_floorplan(mist, cfg, n, site, ini_path, dry):
-    """Upload the floorplan image as a map on the demo site ([site] floorplan)."""
+    """Upload the floorplan image as a map on the demo site. [site] floorplan blank = the
+    bundled AI-generated plan; a path = that image (needs floorplan_ppm); none = skip."""
     s = cfg["site"]
-    path = os.path.expanduser(s.get("floorplan", "").strip())
-    if not path:
+    value = s.get("floorplan", "").strip()
+    ppm = s.get("floorplan_ppm", "").strip()
+    if value.lower() in ("none", "off", "no"):
+        log("note", "floorplan", "none", "[site] floorplan = none")
         return
-    if not os.path.isabs(path):
-        path = os.path.join(os.path.dirname(os.path.abspath(ini_path)), path)
+    if value:  # override: your own image, its scale must be given
+        path = os.path.expanduser(value)
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(os.path.abspath(ini_path)), path)
+        if not ppm:
+            raise BuildError("[site] floorplan_ppm is required with your own floorplan (image pixels per metre)")
+    else:  # default: the bundled AI-generated office plan
+        path, ppm = DEFAULT_FLOORPLAN, ppm or DEFAULT_FLOORPLAN_PPM
     if not os.path.isfile(path):
         raise BuildError(f"[site] floorplan: {path} not found")
+    try:
+        ppm = float(ppm)
+    except ValueError:
+        raise BuildError(f"[site] floorplan_ppm must be a number, not '{ppm}'")
+    if ppm <= 0:
+        raise BuildError("[site] floorplan_ppm must be greater than 0")
     from PIL import Image
     with Image.open(path) as im:
         width, height = im.size
-    ppm = float(s.get("floorplan_ppm", "").strip() or 50)
     size = f"{width / ppm:.0f} m x {height / ppm:.0f} m, {ppm:g} px = 1 m"
     if site.get("id") and any(m.get("name") == n["floorplan"]
                               for m in mist.req("GET", f"{mist.base}/sites/{site['id']}/maps")):
@@ -864,7 +895,10 @@ def step_wlans(mist, cfg, n, site, dry):
             "no longer used - each SSID now has its own template (psk_template / cert_template)")
     wlans = mist.list("wlans")
     templates = {t["id"]: t["name"] for t in mist.list("templates")}
-    for ssid, tname in ((n["psk_ssid"], n["psk_template"]), (n["cert_ssid"], n["cert_template"])):
+    pairs = [(n["psk_ssid"], n["psk_template"]), (n["cert_ssid"], n["cert_template"])]
+    if n["or_enabled"]:
+        pairs.append((n["or_ssid"], n["or_template"]))
+    for ssid, tname in pairs:
         elsewhere = [templates.get(x["template_id"], x["template_id"]) for x in wlans
                      if x.get("ssid") == ssid and x.get("template_id") and templates.get(x["template_id"]) != tname]
         if elsewhere:
@@ -901,6 +935,57 @@ def step_nac(mist, n, dry):
                 {"name": n["nac_rule"], "action": "allow", "enabled": True, "order": 1,
                  "matching": {"auth_type": "eap-tls", "nactags": [tag["id"]]}},
                 dry, "EAP-TLS certificate + Entra group member -> allow")
+
+
+OPENROAMING_OPERATORS = ["openroaming_legacy", "openroaming_settlement_free"]
+
+
+def step_openroaming(mist, n, site, dry):
+    """OpenRoaming: a Passpoint (Hotspot 2.0) 802.1X SSID in its own WLAN template, an
+    OpenRoaming identity provider for that SSID, and an allow rule matched on the SSID name.
+    Modelled on a working home-org setup."""
+    if not n["or_enabled"]:
+        log("note", "OpenRoaming", "off", "[openroaming] enabled = false (or no [openroaming] section)")
+        return
+    ssid = n["or_ssid"]
+    tmpl = wlan_template(mist, n["or_template"], site, n["site"], dry)
+    if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in mist.list("wlans")):
+        log("exists", "SSID", ssid, f"in {n['or_template']}")
+    elif dry:
+        log("would create", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz")
+    else:
+        obj = mist.create("wlans", {
+            "ssid": ssid, "enabled": True, "template_id": tmpl["id"],
+            "auth": {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"]},
+            "auth_servers": [], "mist_nac": {"enabled": True},
+            "hotspot20": {"enabled": True, "operators": OPENROAMING_OPERATORS},
+            "roam_mode": "11r", "bands": ["24", "5", "6"]})
+        STATE.record("mist", "wlans", obj["id"], ssid)
+        log("created", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz")
+
+    sso = mist_ensure(mist, "ssos", "identity provider", n["or_idp"],
+                      {"name": n["or_idp"], "idp_type": "openroaming", "openroaming_ssids": [ssid]},
+                      dry, f"OpenRoaming federation for {ssid}")
+    if sso["id"] != DRY:
+        if sso.get("openroaming_ssids") != [ssid] and not dry:
+            mist.update("ssos", sso["id"], {"openroaming_ssids": [ssid]})
+            log("updated", "identity provider", n["or_idp"], f"SSID {ssid}")
+        nac = dict(mist.req("GET", f"{mist.org}/setting").get("mist_nac") or {})
+        if not any(i.get("id") == sso["id"] for i in nac.get("idps", [])):
+            if dry:
+                log("would add", "Access Assurance IdP", n["or_idp"], "no user realms")
+            else:
+                nac["idps"] = nac.get("idps", []) + [{"id": sso["id"], "user_realms": []}]
+                mist.req("PUT", f"{mist.org}/setting", {"mist_nac": nac})
+                log("added", "Access Assurance IdP", n["or_idp"], "no user realms")
+
+    tag = mist_ensure(mist, "nactags", "NAC label", n["or_tag"],
+                      {"name": n["or_tag"], "type": "match", "match": "ssid", "values": [ssid]},
+                      dry, f"matches SSID {ssid}")
+    mist_ensure(mist, "nacrules", "auth policy rule", n["or_rule"],
+                {"name": n["or_rule"], "action": "allow", "enabled": True, "order": 2,
+                 "matching": {"nactags": [tag["id"]]}},
+                dry, f"SSID {ssid} -> allow")
 
 
 def portal_sso(tenant_id, cert_b64):
@@ -992,7 +1077,7 @@ def build(cfg, mist, g, session, args):
     global RUN
     dry = args.dry_run
     n = names(cfg)
-    RUN = Run(11, pause=args.pause)
+    RUN = Run(12, pause=args.pause)
     started = datetime.now()
 
     RUN.stage("Connect to Entra ID and Mist",
@@ -1055,6 +1140,11 @@ def build(cfg, mist, g, session, args):
               "Allow a device on the secure SSID only if its certificate is valid AND the user is in the Entra group.")
     step_nac(mist, n, dry)
 
+    RUN.stage("Mist: OpenRoaming",
+              f"A Passpoint SSID ({n['or_ssid']}) where visitors join automatically with an OpenRoaming identity "
+              "(e.g. from their phone or Google/Apple account); Access Assurance allows them by SSID.")
+    step_openroaming(mist, n, site, dry)
+
     RUN.stage("Entra ID: SAML settings for Mist portals",
               "Sign the whole SAML response and send the user's UPN as their e-mail-format ID - both required by Mist.")
     policies = step_saml_policies(g, dry)
@@ -1094,6 +1184,7 @@ def build(cfg, mist, g, session, args):
         "org_name": org_name, "org_id": mist.org_id, "cloud": mist.cloud,
         "site": {"name": site.get("name"), "address": site.get("address")},
         "psk_ssid": n["psk_ssid"], "cert_ssid": n["cert_ssid"], "group": n["group"],
+        "or_ssid": n["or_ssid"] if n["or_enabled"] else None,
         "demo_users": csv_list(cfg["entra"].get("demo_users")),
         "portals": [
             {"title": "Wi-Fi passphrase (PSK)", "url": psk.get("ui_url", ""), "ssid": n["psk_ssid"],

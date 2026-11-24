@@ -40,11 +40,12 @@ country_code = GB
 timezone = Europe/London
 latitude = 51.5049
 longitude = -0.0195
-; Floorplan image uploaded to the site as a map (blank = none). Relative paths are
-; next to this ini. floorplan_ppm = image pixels per metre (the sample is 50).
-floorplan = sample_office_floorplan.png
+; Floorplan image uploaded to the site as a map. Blank = the bundled AI-generated
+; sample_office_floorplan.png (50 px per metre); none = no floorplan. Your own image
+; needs floorplan_ppm (image pixels per metre). Relative paths are next to this ini.
+floorplan =
 floorplan_name = Ground Floor
-floorplan_ppm = 50
+floorplan_ppm =
 
 [wlan]
 ; Each SSID gets its own WLAN template; both are applied to the demo site.
@@ -62,6 +63,18 @@ cert_vlan_id =
 ; Blank = "Entra grp: <user_group>" and "EAP-TLS Entra users".
 tag_name =
 rule_name = EAP-TLS Entra users
+
+[openroaming]
+; Passpoint (Hotspot 2.0) SSID for OpenRoaming: visitors join automatically with an
+; OpenRoaming identity. Gets its own WLAN template (applied to the demo site), an
+; OpenRoaming identity provider, an SSID-match NAC label and an allow rule.
+enabled = true
+ssid = OpenRoaming
+; Blank = "Access Assurance - <ssid>", "OpenRoaming", "SSID: <ssid>", "OpenRoaming SSID".
+template =
+idp_name =
+tag_name =
+rule_name =
 
 [psk_portal]
 name = PSK Self-Service
