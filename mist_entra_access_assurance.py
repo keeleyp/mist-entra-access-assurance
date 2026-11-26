@@ -28,6 +28,7 @@ import configparser
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -887,6 +888,13 @@ def wlan_template(mist, name, site, site_name, dry):
     return tmpl
 
 
+# Best practice for every demo SSID: 2.4/5/6 GHz with high-density data rates.
+WLAN_BEST_PRACTICE = {"bands": ["24", "5", "6"],
+                      "rateset": {band: {"template": "high-density", "min_rssi": 0} for band in ("24", "5", "6")}}
+# Guest / BYOD SSIDs: block client-to-client traffic on the same subnet (not just the same AP).
+CLIENT_ISOLATION = {"isolation": True, "l2_isolation": True}
+
+
 def step_wlans(mist, cfg, n, site, dry):
     """Each SSID gets its own WLAN template; both templates apply to the demo site."""
     w = cfg["wlan"]
@@ -920,11 +928,25 @@ def step_wlans(mist, cfg, n, site, dry):
         STATE.record("mist", "wlans", obj["id"], ssid)
         log("created", "SSID", ssid, explain)
 
-    wlan(n["psk_ssid"], n["psk_template"], {"type": "psk", "multi_psk_only": True},
-         int_or_none(w.get("psk_vlan_id")), {}, "WPA2 Multi-PSK - every user gets their own passphrase")
-    wlan(n["cert_ssid"], n["cert_template"], {"type": "eap"}, int_or_none(w.get("cert_vlan_id")),
-         {"auth_servers": [], "mist_nac": {"enabled": True}},
-         "WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance")
+    # BYOD Multi-PSK: WPA3-SAE, cloud PSKs looked up by Access Assurance (RADIUS), clients isolated.
+    # No 802.11r: Fast Roaming is not offered for Multi-PSK. The default PSK is a random fallback
+    # nobody is told, so only portal-issued PSKs can join.
+    wlan(n["psk_ssid"], n["psk_template"],
+         {"type": "psk", "multi_psk_only": False, "pairwise": ["wpa3"], "enable_mac_auth": False,
+          "private_wlan": False},
+         int_or_none(w.get("psk_vlan_id")),
+         {**WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "roam_mode": "NONE", "disable_11be": True,
+          "auth_servers": [], "mist_nac": {"enabled": True},
+          "dynamic_psk": {"enabled": True, "source": "radius", "default_psk": secrets.token_urlsafe(18),
+                          "private_wlan": False}},
+         "WPA3 Multi-PSK via Access Assurance - every user gets their own passphrase; "
+         "high-density rates, clients isolated (same subnet)")
+    wlan(n["cert_ssid"], n["cert_template"],
+         {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False, "eap_reauth": False,
+          "multi_psk_only": False, "private_wlan": False},
+         int_or_none(w.get("cert_vlan_id")),
+         {**WLAN_BEST_PRACTICE, "roam_mode": "11r", "disable_11be": True, "auth_servers": [], "mist_nac": {"enabled": True}},
+         "WPA3/WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance; high-density rates, 802.11r")
 
 
 def step_nac(mist, n, dry):
@@ -952,16 +974,17 @@ def step_openroaming(mist, n, site, dry):
     if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in mist.list("wlans")):
         log("exists", "SSID", ssid, f"in {n['or_template']}")
     elif dry:
-        log("would create", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz")
+        log("would create", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz, high-density, 802.11r, isolated")
     else:
         obj = mist.create("wlans", {
             "ssid": ssid, "enabled": True, "template_id": tmpl["id"],
-            "auth": {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"]},
+            "auth": {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False,
+                     "eap_reauth": False, "multi_psk_only": False, "private_wlan": False},
             "auth_servers": [], "mist_nac": {"enabled": True},
             "hotspot20": {"enabled": True, "operators": OPENROAMING_OPERATORS},
-            "roam_mode": "11r", "bands": ["24", "5", "6"]})
+            **WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "roam_mode": "11r", "disable_11be": False})
         STATE.record("mist", "wlans", obj["id"], ssid)
-        log("created", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz")
+        log("created", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz, high-density, 802.11r, isolated")
 
     sso = mist_ensure(mist, "ssos", "identity provider", n["or_idp"],
                       {"name": n["or_idp"], "idp_type": "openroaming", "openroaming_ssids": [ssid]},

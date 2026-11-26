@@ -14,7 +14,7 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 | 4. Entra group | Onboarding security group, with the demo users added |
 | 5. Mist IdP | OAuth/Azure identity provider using a fresh client secret (never shown), plus realm mapping and the default IdP |
 | 6. Internal CA | Turns on the Mist onboard CA for BYOD certificates |
-| 7. SSIDs | A Multi-PSK SSID and an 802.1X SSID on Mist NAC, each in its own WLAN template. Both templates are applied to the demo site |
+| 7. SSIDs | A WPA3 Multi-PSK (BYOD) SSID whose PSKs Access Assurance looks up, and an 802.1X SSID on Mist NAC, each in its own WLAN template. Both templates are applied to the demo site. Best practice: high-density data rates on every SSID, 802.11r on the 802.1X SSIDs (Multi-PSK has no Fast Roaming), and client isolation (same subnet) on the BYOD and OpenRoaming SSIDs |
 | 8. Auth policy | NAC label (Entra group) and the rule *EAP-TLS + group → allow* |
 | 9. OpenRoaming | A Passpoint (Hotspot 2.0) 802.1X SSID in its own WLAN template, an OpenRoaming identity provider for it, and the rule *SSID → allow* (an SSID-match NAC label). Turn off with `[openroaming] enabled = false` |
 | 10. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
