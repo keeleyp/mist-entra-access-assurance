@@ -1,40 +1,46 @@
 ; Mist Access Assurance + Entra ID demo builder.
-; Copy to mist_entra_access_assurance.ini and edit. Mist object names must be
-; 32 characters or fewer (Mist UI limit) - the script checks this before it starts.
+; Copy to mist_entra_access_assurance.ini and edit. Sections follow the order the build runs
+; in. Mist object names must be 32 characters or fewer (Mist UI limit) - the script checks
+; this before it starts.
 
+; ---------------------------------------------------------------- 1. Connect
 [mist]
 ; API host for your Mist cloud (manage.gc3.mist.com -> api.gc3.mist.com) and an
 ; org admin API token.
 cloud = api.gc3.mist.com
 token = <org admin API token>
 ; Only needed if the token has write access to more than one org.
-org_id =
-; Name of the Entra ID identity provider in Mist.
+org_id = 
+; Name of the Entra ID identity provider in Mist (step 8).
 idp_name = Entra ID
 
+; ------------------------------------------- 1, 3-5. Entra ID: app, group, SAML
 [entra]
 ; Tenant to sign in to: a verified domain, xxx.onmicrosoft.com, or the tenant ID.
 ; The script shows a device code; sign in as a Global Administrator.
 tenant = contoso.onmicrosoft.com
-; Prefix for the Entra objects (app registrations).
-name_prefix = Mist Access Assurance
+; Prefix for the Entra app registrations: "<prefix> IdP Connector", "<prefix> PSK Portal",
+; "<prefix> PSK Portal Isolated", "<prefix> Cert Portal". An existing app with the same
+; name is reused (and changed), not recreated.
+name_prefix = Mist AA
 ; Security group whose members may use the portals and get Wi-Fi access.
 user_group = Mist WiFi Users
 ; Existing users (UPNs, comma separated) added to the group for the demo.
 demo_users = alex@contoso.onmicrosoft.com
-; User realms routed to Entra ID. Blank = all of the tenant's verified domains.
-domains =
-; Make Entra ID the default Access Assurance identity provider.
+; User realms routed to Entra ID (step 8). Blank = all of the tenant's verified domains.
+domains = 
+; Make Entra ID the default Access Assurance identity provider (step 8).
 default_idp = true
 ; Lifetime of the IdP Connector client secret and the SAML signing certs (max 36).
 secret_months = 24
 saml_cert_months = 36
 
+; ---------------------------------------------------------------- 2. Demo site
 [site]
 ; Existing site used for the demo; it is renamed and given the address below.
 ; --teardown puts its original name, address and location back.
 current_name = Primary Site
-name = Access Assurance Demo
+name = AA Demo
 address = 1 Canada Square, London E14 5AB, United Kingdom
 country_code = GB
 timezone = Europe/London
@@ -43,58 +49,84 @@ longitude = -0.0195
 ; Floorplan image uploaded to the site as a map. Blank = the bundled AI-generated
 ; sample_office_floorplan.png (50 px per metre); none = no floorplan. Your own image
 ; needs floorplan_ppm (image pixels per metre). Relative paths are next to this ini.
-floorplan =
+floorplan = 
 floorplan_name = Ground Floor
-floorplan_ppm =
+floorplan_ppm = 
 
+; ---------------------------------------------------------------- 7. SSIDs
 [wlan]
-; Each SSID gets its own WLAN template; both are applied to the demo site.
-; Blank = "Access Assurance - <ssid>".
-psk_template =
-cert_template =
-; Multi-PSK SSID used by the PSK self-service portal.
+; Each SSID gets its own WLAN template, applied to the demo site.
+; Multi-PSK (BYOD) SSID used by both PSK portals.
 psk_ssid = Corp-PSK
-psk_vlan_id =
+psk_vlan_id = 
 ; 802.1X SSID on Mist Access Assurance, used by the certificate portal.
 cert_ssid = Corp-Secure
-cert_vlan_id =
+cert_vlan_id = 
+; WLAN template names. Blank = "AA - <ssid>".
+psk_template = 
+cert_template = 
 
-[nac]
-; Blank = "Entra grp: <user_group>" and "EAP-TLS Entra users".
-tag_name =
-rule_name = EAP-TLS Entra users
-
+; ------------------------------------- 7-9. OpenRoaming SSID, IdP and policy
 [openroaming]
 ; Passpoint (Hotspot 2.0) SSID for OpenRoaming: visitors join automatically with an
-; OpenRoaming identity. Gets its own WLAN template (applied to the demo site), an
-; OpenRoaming identity provider, an SSID-match NAC label and an allow rule.
+; OpenRoaming identity. Gets its own WLAN template (step 7), an OpenRoaming identity
+; provider (step 8), and an SSID-match NAC label + allow rule (step 9).
 enabled = true
 ssid = OpenRoaming
-; Blank = "Access Assurance - <ssid>", "OpenRoaming", "SSID: <ssid>", "OpenRoaming SSID".
-template =
-idp_name =
-tag_name =
-rule_name =
+; Blank = "AA - <ssid>", "OpenRoaming", "SSID: <ssid>", "OpenRoaming SSID".
+template = 
+idp_name = 
+tag_name = 
+rule_name = 
+; Role Access Assurance returns for OpenRoaming users (label "Role: <role>").
+; Must differ from [nac] role.
+role = Guest
 
+; ---------------------------------------------------- 9. Access Assurance policy
+[nac]
+; Rule for the 802.1X SSID: EAP-TLS certificate + member of [entra] user_group -> allow.
+; Blank tag_name = "Entra grp: <user_group>".
+tag_name = 
+rule_name = EAP-TLS Entra users
+; Role Access Assurance returns for the 802.1X SSID (a RADIUS-group NAC label "Role: <role>").
+role = Corp
+
+; ---------------------------------------------------- 11. Onboarding portals
 [psk_portal]
 name = PSK Self-Service
+; Role stamped on every PSK the portal issues.
+role = BYOD
 expire_days = 365
 ; Devices per PSK (0 = unlimited).
 max_usage = 5
 passphrase_length = 12
 
+[psk_portal_isolated]
+; A second PSK portal on the same PSK SSID (step 11). Its passphrases carry this role, and
+; a WxLAN policy in the PSK SSID's WLAN template (step 10: org labels "Isolated BYOD Users",
+; "Internet", "Local Network") lets those users reach the internet but not the local
+; network (RFC 1918 subnets). Expiry, devices per PSK and passphrase length come from
+; [psk_portal].
+enabled = true
+name = BYoD_Isolated
+; Must differ from [psk_portal] role.
+role = BYoD_Isolated
+; Optional VLAN for these clients. Blank = [wlan] psk_vlan_id.
+vlan_id = 
+
 [cert_portal]
 name = Certificate Onboarding
-cert_expire_days = 365
-; wpa2 or wpa3
-eap_type = wpa2
+; Wi-Fi profile the Marvis Client installs: wpa2 or wpa3.
+eap_type = wpa3
 ; wireless or wireless+wired
 access_type = wireless
+cert_expire_days = 365
 
+; ---------------------------------------------------------------- Output
 [output]
 ; Relative paths are next to this ini. Each run adds a timestamp to the name, e.g.
 ; Mist_Access_Assurance_Demo_Report_20261119-143005.docx
-; Word report with QR codes for both portals (written by each build).
+; Word report with QR codes for every portal (written by each build).
 report = Mist_Access_Assurance_Demo_Report.docx
 ; Everything shown on screen, with a time on each line (written by every run;
 ; the name also says build, dry-run or teardown).

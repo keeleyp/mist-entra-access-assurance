@@ -130,6 +130,7 @@ def write_report(path, ctx):
     doc.add_paragraph("Scan a code with a phone, sign in with an Entra ID account that is a "
                       f"member of '{ctx['group']}', and follow the portal.")
     portals = ctx["portals"]
+    col = 174 / len(portals)  # page width between margins, shared by the portal columns
     t = doc.add_table(rows=2, cols=len(portals))
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
     for i, prt in enumerate(portals):
@@ -143,7 +144,7 @@ def write_report(path, ctx):
         r.font.color.rgb = RGBColor.from_string(ACCENT)
         ip = top.add_paragraph()
         ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        ip.add_run().add_picture(_qr_png(prt["url"]), width=Mm(58))
+        ip.add_run().add_picture(_qr_png(prt["url"]), width=Mm(min(58, col - 8)))
         sp = top.add_paragraph()
         sp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         sp.add_run(f"SSID: {prt['ssid']}").bold = True
@@ -156,8 +157,8 @@ def write_report(path, ctx):
         hr = hw.add_run(prt["how"])
         hr.font.size = Pt(9)
         for row in t.rows:
-            row.cells[i].width = Mm(87)
-    _fixed_width(t, [87] * len(portals))
+            row.cells[i].width = Mm(col)
+    _fixed_width(t, [col] * len(portals))
     doc.add_paragraph()
 
     doc.add_heading("What was built, step by step", level=1)

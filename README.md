@@ -12,14 +12,13 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 | 2. Demo site | Renames the site, sets its address, country, timezone and location from the ini, and uploads its floorplan |
 | 3. Entra app | **IdP Connector** app registration with Graph `User.Read` (delegated) and `User.Read.All`, `GroupMember.Read.All`, `Device.Read.All` (application). Grants admin consent and turns on public client flows (ROPC / EAP-TTLS) |
 | 4. Entra group | Onboarding security group, with the demo users added |
-| 5. Mist IdP | OAuth/Azure identity provider using a fresh client secret (never shown), plus realm mapping and the default IdP |
+| 5. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
 | 6. Internal CA | Turns on the Mist onboard CA for BYOD certificates |
-| 7. SSIDs | A WPA3 Multi-PSK (BYOD) SSID whose PSKs Access Assurance looks up, and an 802.1X SSID on Mist NAC, each in its own WLAN template. Both templates are applied to the demo site. Best practice: high-density data rates on every SSID, 802.11r on the 802.1X SSIDs (Multi-PSK has no Fast Roaming), and client isolation (same subnet) on the BYOD and OpenRoaming SSIDs |
-| 8. Auth policy | NAC label (Entra group) and the rule *EAP-TLS + group → allow* |
-| 9. OpenRoaming | A Passpoint (Hotspot 2.0) 802.1X SSID in its own WLAN template, an OpenRoaming identity provider for it, and the rule *SSID → allow* (an SSID-match NAC label). Turn off with `[openroaming] enabled = false` |
-| 10. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
-| 11. PSK portal | BYOD self-service portal with Entra SSO and no email collection or notifications, plus its SAML app |
-| 12. Cert portal | Marvis Client certificate onboarding portal with Entra SSO, plus its SAML app |
+| 7. SSIDs | Every SSID, each in its own WLAN template applied to the demo site: a WPA2 Multi-PSK (BYOD, 2.4/5 GHz) SSID whose PSKs Access Assurance looks up (WPA2 because the Mist PSK portal editor does not list WPA3 RADIUS-PSK WLANs); a WPA3/WPA2 802.1X SSID on Mist NAC; and, if `[openroaming] enabled`, a Passpoint (Hotspot 2.0) OpenRoaming SSID. Best practice: high-density data rates everywhere, 802.11r on the 802.1X SSIDs (Multi-PSK has no Fast Roaming), client isolation (same subnet) on the BYOD and OpenRoaming SSIDs |
+| 8. Identity providers | Entra ID as an OAuth/Azure identity provider using a fresh client secret (never shown), with realm mapping and the default IdP; plus an OpenRoaming identity provider for the OpenRoaming SSID |
+| 9. Access Assurance policy | NAC labels and rules: *EAP-TLS + Entra group → allow*, returning role `[nac] role` (default **Corp**); *OpenRoaming SSID → allow*, returning `[openroaming] role` (default **Guest**). Roles are RADIUS-group labels. Multi-PSK joins do not use these rules |
+| 10. WxLAN policy | If `[psk_portal_isolated] enabled`: org labels *Isolated BYOD Users* (role **BYoD_Isolated**), *Internet* (0.0.0.0/0) and *Local Network* (RFC 1918), and a policy in the PSK SSID's WLAN template: *Isolated BYOD Users → allow Internet, deny Local Network* |
+| 11. Portals | Each with Entra SSO and its own SAML app: the BYOD **PSK Self-Service** portal (role **BYOD**, no email collection or notifications); the **BYoD_Isolated** PSK portal on the same SSID (role **BYoD_Isolated**, optional VLAN); and the Marvis Client **certificate onboarding** portal, which installs a WPA3 profile (`[cert_portal] eap_type`) |
 
 When the build finishes, it writes a **Word report** with both portal QR codes and every action taken.
 
@@ -56,6 +55,11 @@ python3 mist_entra_access_assurance.py --teardown
 
 - `--dry-run` reads only and shows every step it would take.
 - `--pause` waits for Enter between steps, so you can talk the audience through them.
+- Before it connects, the build prints a short summary of what it will create and asks:
+  **1** site, floorplan and networks, or **2** networks only. Networks only leaves the site's
+  name, address and floorplan alone (the SSID templates are still applied to it).
+  `--with-site` or `--networks-only` answers the question up front; one of them is required
+  when there is no terminal to ask on.
 - `--teardown` restores everything from the snapshot. Add `--yes` to skip the prompt.
 
 Entra sign-in uses a device code. Sign in as a Global Administrator. The token is cached in `.msal_token_cache.json` (chmod 600), so later runs usually don't need it. Re-running the build is safe: anything that already exists is skipped, and the report keeps the full history.

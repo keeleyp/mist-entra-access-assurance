@@ -263,7 +263,7 @@ def load_config(path):
 def names(cfg):
     """All object names, with Mist names checked against the 32-character UI limit."""
     e = cfg["entra"]
-    prefix = e.get("name_prefix", "").strip() or "Mist Access Assurance"
+    prefix = e.get("name_prefix", "").strip() or "Mist AA"
     n = {
         "prefix": prefix,
         "group": e["user_group"].strip(),
@@ -280,17 +280,36 @@ def names(cfg):
         "site": cfg["site"]["name"].strip(),
     }
     # One WLAN template per SSID, both applied to the demo site.
-    n["psk_template"] = cfg["wlan"].get("psk_template", "").strip() or f"Access Assurance - {n['psk_ssid']}"
-    n["cert_template"] = cfg["wlan"].get("cert_template", "").strip() or f"Access Assurance - {n['cert_ssid']}"
+    n["psk_template"] = cfg["wlan"].get("psk_template", "").strip() or f"AA - {n['psk_ssid']}"
+    n["cert_template"] = cfg["wlan"].get("cert_template", "").strip() or f"AA - {n['cert_ssid']}"
     n["floorplan"] = cfg["site"].get("floorplan_name", "").strip() or "Ground Floor"
+    # Roles: Access Assurance returns one (RADIUS group) for 802.1X and OpenRoaming; the PSK portal
+    # stamps one on every PSK it issues.
+    n["corp_role"] = cfg["nac"].get("role", "").strip() or "Corp"
+    n["psk_role"] = cfg["psk_portal"].get("role", "").strip() or "BYOD"
+    # Optional second PSK portal on the same SSID: its PSKs get a role that a WxLAN policy in the
+    # PSK SSID's template limits to the internet (no local network).
+    i = cfg["psk_portal_isolated"] if cfg.has_section("psk_portal_isolated") else {}
+    n["iso_enabled"] = cfg.getboolean("psk_portal_isolated", "enabled", fallback=False)
+    n["iso_portal"] = (i.get("name", "") or "").strip() or "BYoD_Isolated"
+    n["iso_role"] = (i.get("role", "") or "").strip() or "BYoD_Isolated"
+    n["iso_vlan"] = (i.get("vlan_id", "") or "").strip()
+    n["entra_iso_app"] = f"{prefix} PSK Portal Isolated"
+    n["iso_user_tag"], n["internet_tag"], n["local_tag"] = "Isolated BYOD Users", "Internet", "Local Network"
+    if n["iso_enabled"] and (n["iso_portal"] == n["psk_portal"] or n["iso_role"] == n["psk_role"]):
+        raise BuildError("[psk_portal_isolated] name and role must differ from [psk_portal]")
     # Optional OpenRoaming SSID ([openroaming] enabled = true)
     o = cfg["openroaming"] if cfg.has_section("openroaming") else {}
     n["or_enabled"] = cfg.getboolean("openroaming", "enabled", fallback=False)
     n["or_ssid"] = (o.get("ssid", "") or "").strip() or "OpenRoaming"
-    n["or_template"] = (o.get("template", "") or "").strip() or f"Access Assurance - {n['or_ssid']}"
+    n["or_template"] = (o.get("template", "") or "").strip() or f"AA - {n['or_ssid']}"
     n["or_idp"] = (o.get("idp_name", "") or "").strip() or "OpenRoaming"
     n["or_tag"] = (o.get("tag_name", "") or "").strip() or f"SSID: {n['or_ssid']}"
     n["or_rule"] = (o.get("rule_name", "") or "").strip() or "OpenRoaming SSID"
+    n["or_role"] = (o.get("role", "") or "").strip() or "Guest"
+    n["corp_role_tag"], n["or_role_tag"] = f"Role: {n['corp_role']}", f"Role: {n['or_role']}"
+    if n["or_enabled"] and n["or_role"] == n["corp_role"]:
+        raise BuildError("[openroaming] role must differ from [nac] role")
     templates = [n["psk_template"], n["cert_template"]] + ([n["or_template"]] if n["or_enabled"] else [])
     if len(set(templates)) != len(templates):
         raise BuildError("WLAN template names must all be different ([wlan] psk_template / cert_template, "
@@ -298,9 +317,11 @@ def names(cfg):
     if n["or_enabled"] and n["or_ssid"] in (n["psk_ssid"], n["cert_ssid"]):
         raise BuildError("[openroaming] ssid must differ from the PSK and 802.1X SSIDs")
     keys = ["mist_idp", "floorplan", "psk_template", "cert_template", "psk_ssid", "cert_ssid", "nac_tag", "nac_rule",
-            "psk_portal", "cert_portal"]
+            "psk_portal", "cert_portal", "corp_role_tag", "psk_role"]
+    if n["iso_enabled"]:
+        keys += ["iso_portal", "iso_role"]
     if n["or_enabled"]:
-        keys += ["or_ssid", "or_template", "or_idp", "or_tag", "or_rule"]
+        keys += ["or_ssid", "or_template", "or_idp", "or_tag", "or_rule", "or_role_tag"]
     too_long = [f"{k} '{n[k]}' ({len(n[k])})" for k in keys if len(n[k]) > MIST_NAME_MAX]
     if too_long:
         raise BuildError(f"Mist names must be <= {MIST_NAME_MAX} characters - shorten in the ini: "
@@ -805,6 +826,119 @@ def mist_ensure(mist, ep, kind, name, body, dry, explain=""):
     return obj
 
 
+def step_internal_ca(mist, dry):
+    # Must use the dedicated endpoint: mist_scep inside PUT /setting is stored but
+    # does NOT provision the CA (the UI keeps showing "Disable").
+    scep = mist.req("GET", f"{mist.org}/setting/mist_scep")
+    providers = list(scep.get("cert_providers") or [])
+    if scep.get("enabled") and "byod" in providers:
+        log("exists", "internal CA", "enabled for BYOD certificates")
+        return
+    if dry:
+        log("would enable", "internal CA", "BYOD certificate provider")
+        return
+    if "byod" not in providers:
+        providers.append("byod")
+    scep = mist.req("PUT", f"{mist.org}/setting/mist_scep", {"enable": True, "cert_providers": providers})
+    if not scep.get("enabled"):
+        raise BuildError(f"Mist internal CA did not enable: {scep}")
+    log("enabled", "internal CA", "Onboard CA", "issues client certificates to onboarded devices")
+
+
+def wlan_template(mist, name, site, site_name, dry):
+    """Find or create a WLAN template and make sure it applies to the demo site."""
+    tmpl = mist.find("templates", name)
+    if tmpl:
+        log("exists", "WLAN template", name)
+        ids = tmpl.get("applies", {}).get("site_ids", [])
+        if not dry and site["id"] not in ids:
+            tmpl = mist.update("templates", tmpl["id"], {"applies": {"site_ids": ids + [site["id"]]}})
+            log("updated", "WLAN template", name, f"applied to {site_name}")
+        return tmpl
+    if dry:
+        log("would create", "WLAN template", name, f"applied to {site_name}")
+        return {"id": DRY}
+    tmpl = mist.create("templates", {"name": name, "applies": {"site_ids": [site["id"]]}})
+    STATE.record("mist", "templates", tmpl["id"], name)
+    log("created", "WLAN template", name, f"applied to {site_name}")
+    return tmpl
+
+
+# Best practice for every demo SSID: 2.4/5/6 GHz with high-density data rates.
+WLAN_BEST_PRACTICE = {"bands": ["24", "5", "6"],
+                      "rateset": {band: {"template": "high-density", "min_rssi": 0} for band in ("24", "5", "6")}}
+# Passpoint roaming consortiums the OpenRoaming SSID advertises.
+OPENROAMING_OPERATORS = ["openroaming_legacy", "openroaming_settlement_free"]
+# Guest / BYOD SSIDs: block client-to-client traffic on the same subnet (not just the same AP).
+CLIENT_ISOLATION = {"isolation": True, "l2_isolation": True}
+
+
+def step_wlans(mist, cfg, n, site, dry):
+    """Every demo SSID (PSK, 802.1X and, if enabled, OpenRoaming), each in its own WLAN template
+    applied to the demo site."""
+    w = cfg["wlan"]
+    if w.get("template_name", "").strip():
+        log("note", "ini [wlan] template_name", w["template_name"].strip(),
+            "no longer used - each SSID now has its own template (psk_template / cert_template)")
+    wlans = mist.list("wlans")
+    templates = {t["id"]: t["name"] for t in mist.list("templates")}
+    pairs = [(n["psk_ssid"], n["psk_template"]), (n["cert_ssid"], n["cert_template"])]
+    if n["or_enabled"]:
+        pairs.append((n["or_ssid"], n["or_template"]))
+    for ssid, tname in pairs:
+        elsewhere = [templates.get(x["template_id"], x["template_id"]) for x in wlans
+                     if x.get("ssid") == ssid and x.get("template_id") and templates.get(x["template_id"]) != tname]
+        if elsewhere:
+            raise BuildError(f"SSID {ssid} already exists in WLAN template '{elsewhere[0]}' - run --teardown "
+                             f"first (e.g. a build from an older version), or rename the SSID in the ini")
+
+    def wlan(ssid, tname, auth, vlan, extra, explain):
+        tmpl = wlan_template(mist, tname, site, site["name"], dry)
+        if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in wlans):
+            log("exists", "SSID", ssid, f"in {tname}")
+            return
+        if dry:
+            log("would create", "SSID", ssid, explain)
+            return
+        body = {"ssid": ssid, "enabled": True, "template_id": tmpl["id"], "auth": auth, **extra}
+        if vlan:
+            body.update({"vlan_enabled": True, "vlan_id": vlan})
+        obj = mist.create("wlans", body)
+        STATE.record("mist", "wlans", obj["id"], ssid)
+        log("created", "SSID", ssid, explain)
+
+    # BYOD Multi-PSK: WPA2, cloud PSKs looked up by Access Assurance (RADIUS), clients isolated.
+    # WPA2 only, so 2.4/5 GHz: the Mist UI's PSK portal editor hides RADIUS-PSK WLANs that use WPA3,
+    # and 6 GHz needs WPA3. No 802.11r: Fast Roaming is not offered for Multi-PSK. The default PSK
+    # is a random fallback nobody is told, so only portal-issued PSKs can join.
+    wlan(n["psk_ssid"], n["psk_template"],
+         {"type": "psk", "multi_psk_only": False, "pairwise": ["wpa2-ccmp"], "enable_mac_auth": False,
+          "private_wlan": False},
+         int_or_none(w.get("psk_vlan_id")),
+         {**WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "bands": ["24", "5"], "roam_mode": "NONE", "disable_11be": True,
+          "auth_servers": [], "mist_nac": {"enabled": True},
+          "dynamic_psk": {"enabled": True, "source": "radius", "default_psk": secrets.token_urlsafe(18),
+                          "private_wlan": False}},
+         "WPA2 Multi-PSK via Access Assurance (2.4/5 GHz) - every user gets their own passphrase; "
+         "high-density rates, clients isolated (same subnet)")
+    wlan(n["cert_ssid"], n["cert_template"],
+         {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False, "eap_reauth": False,
+          "multi_psk_only": False, "private_wlan": False},
+         int_or_none(w.get("cert_vlan_id")),
+         {**WLAN_BEST_PRACTICE, "roam_mode": "11r", "disable_11be": True, "auth_servers": [], "mist_nac": {"enabled": True}},
+         "WPA3/WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance; high-density rates, 802.11r")
+    # OpenRoaming: Passpoint (Hotspot 2.0) 802.1X guest SSID, modelled on a working home-org setup.
+    if n["or_enabled"]:
+        wlan(n["or_ssid"], n["or_template"],
+             {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False, "eap_reauth": False,
+              "multi_psk_only": False, "private_wlan": False},
+             None,
+             {**WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "roam_mode": "11r", "disable_11be": False,
+              "auth_servers": [], "mist_nac": {"enabled": True},
+              "hotspot20": {"enabled": True, "operators": OPENROAMING_OPERATORS}},
+             "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz, high-density, 802.11r, isolated")
+
+
 def step_mist_idp(mist, g, cfg, n, tenant_id, realms, idp_app, args):
     dry = args.dry_run
     body = {"name": n["mist_idp"], "idp_type": "oauth", "oauth_type": "azure", "oauth_tenant_id": tenant_id,
@@ -850,165 +984,105 @@ def step_mist_idp(mist, g, cfg, n, tenant_id, realms, idp_app, args):
     return sso
 
 
-def step_internal_ca(mist, dry):
-    # Must use the dedicated endpoint: mist_scep inside PUT /setting is stored but
-    # does NOT provision the CA (the UI keeps showing "Disable").
-    scep = mist.req("GET", f"{mist.org}/setting/mist_scep")
-    providers = list(scep.get("cert_providers") or [])
-    if scep.get("enabled") and "byod" in providers:
-        log("exists", "internal CA", "enabled for BYOD certificates")
-        return
-    if dry:
-        log("would enable", "internal CA", "BYOD certificate provider")
-        return
-    if "byod" not in providers:
-        providers.append("byod")
-    scep = mist.req("PUT", f"{mist.org}/setting/mist_scep", {"enable": True, "cert_providers": providers})
-    if not scep.get("enabled"):
-        raise BuildError(f"Mist internal CA did not enable: {scep}")
-    log("enabled", "internal CA", "Onboard CA", "issues client certificates to onboarded devices")
-
-
-def wlan_template(mist, name, site, site_name, dry):
-    """Find or create a WLAN template and make sure it applies to the demo site."""
-    tmpl = mist.find("templates", name)
-    if tmpl:
-        log("exists", "WLAN template", name)
-        ids = tmpl.get("applies", {}).get("site_ids", [])
-        if not dry and site["id"] not in ids:
-            tmpl = mist.update("templates", tmpl["id"], {"applies": {"site_ids": ids + [site["id"]]}})
-            log("updated", "WLAN template", name, f"applied to {site_name}")
-        return tmpl
-    if dry:
-        log("would create", "WLAN template", name, f"applied to {site_name}")
-        return {"id": DRY}
-    tmpl = mist.create("templates", {"name": name, "applies": {"site_ids": [site["id"]]}})
-    STATE.record("mist", "templates", tmpl["id"], name)
-    log("created", "WLAN template", name, f"applied to {site_name}")
-    return tmpl
-
-
-# Best practice for every demo SSID: 2.4/5/6 GHz with high-density data rates.
-WLAN_BEST_PRACTICE = {"bands": ["24", "5", "6"],
-                      "rateset": {band: {"template": "high-density", "min_rssi": 0} for band in ("24", "5", "6")}}
-# Guest / BYOD SSIDs: block client-to-client traffic on the same subnet (not just the same AP).
-CLIENT_ISOLATION = {"isolation": True, "l2_isolation": True}
-
-
-def step_wlans(mist, cfg, n, site, dry):
-    """Each SSID gets its own WLAN template; both templates apply to the demo site."""
-    w = cfg["wlan"]
-    if w.get("template_name", "").strip():
-        log("note", "ini [wlan] template_name", w["template_name"].strip(),
-            "no longer used - each SSID now has its own template (psk_template / cert_template)")
-    wlans = mist.list("wlans")
-    templates = {t["id"]: t["name"] for t in mist.list("templates")}
-    pairs = [(n["psk_ssid"], n["psk_template"]), (n["cert_ssid"], n["cert_template"])]
-    if n["or_enabled"]:
-        pairs.append((n["or_ssid"], n["or_template"]))
-    for ssid, tname in pairs:
-        elsewhere = [templates.get(x["template_id"], x["template_id"]) for x in wlans
-                     if x.get("ssid") == ssid and x.get("template_id") and templates.get(x["template_id"]) != tname]
-        if elsewhere:
-            raise BuildError(f"SSID {ssid} already exists in WLAN template '{elsewhere[0]}' - run --teardown "
-                             f"first (e.g. a build from an older version), or rename the SSID in the ini")
-
-    def wlan(ssid, tname, auth, vlan, extra, explain):
-        tmpl = wlan_template(mist, tname, site, n["site"], dry)
-        if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in wlans):
-            log("exists", "SSID", ssid, f"in {tname}")
-            return
-        if dry:
-            log("would create", "SSID", ssid, explain)
-            return
-        body = {"ssid": ssid, "enabled": True, "template_id": tmpl["id"], "auth": auth, **extra}
-        if vlan:
-            body.update({"vlan_enabled": True, "vlan_id": vlan})
-        obj = mist.create("wlans", body)
-        STATE.record("mist", "wlans", obj["id"], ssid)
-        log("created", "SSID", ssid, explain)
-
-    # BYOD Multi-PSK: WPA3-SAE, cloud PSKs looked up by Access Assurance (RADIUS), clients isolated.
-    # No 802.11r: Fast Roaming is not offered for Multi-PSK. The default PSK is a random fallback
-    # nobody is told, so only portal-issued PSKs can join.
-    wlan(n["psk_ssid"], n["psk_template"],
-         {"type": "psk", "multi_psk_only": False, "pairwise": ["wpa3"], "enable_mac_auth": False,
-          "private_wlan": False},
-         int_or_none(w.get("psk_vlan_id")),
-         {**WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "roam_mode": "NONE", "disable_11be": True,
-          "auth_servers": [], "mist_nac": {"enabled": True},
-          "dynamic_psk": {"enabled": True, "source": "radius", "default_psk": secrets.token_urlsafe(18),
-                          "private_wlan": False}},
-         "WPA3 Multi-PSK via Access Assurance - every user gets their own passphrase; "
-         "high-density rates, clients isolated (same subnet)")
-    wlan(n["cert_ssid"], n["cert_template"],
-         {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False, "eap_reauth": False,
-          "multi_psk_only": False, "private_wlan": False},
-         int_or_none(w.get("cert_vlan_id")),
-         {**WLAN_BEST_PRACTICE, "roam_mode": "11r", "disable_11be": True, "auth_servers": [], "mist_nac": {"enabled": True}},
-         "WPA3/WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance; high-density rates, 802.11r")
-
-
-def step_nac(mist, n, dry):
-    tag = mist_ensure(mist, "nactags", "NAC label", n["nac_tag"],
-                      {"name": n["nac_tag"], "type": "match", "match": "idp_role", "values": [n["group"]]},
-                      dry, f"matches Entra group '{n['group']}'")
-    mist_ensure(mist, "nacrules", "auth policy rule", n["nac_rule"],
-                {"name": n["nac_rule"], "action": "allow", "enabled": True, "order": 1,
-                 "matching": {"auth_type": "eap-tls", "nactags": [tag["id"]]}},
-                dry, "EAP-TLS certificate + Entra group member -> allow")
-
-
-OPENROAMING_OPERATORS = ["openroaming_legacy", "openroaming_settlement_free"]
-
-
-def step_openroaming(mist, n, site, dry):
-    """OpenRoaming: a Passpoint (Hotspot 2.0) 802.1X SSID in its own WLAN template, an
-    OpenRoaming identity provider for that SSID, and an allow rule matched on the SSID name.
-    Modelled on a working home-org setup."""
+def step_openroaming_idp(mist, n, dry):
+    """OpenRoaming identity provider for the OpenRoaming SSID, added to Access Assurance with no realms."""
     if not n["or_enabled"]:
         log("note", "OpenRoaming", "off", "[openroaming] enabled = false (or no [openroaming] section)")
         return
     ssid = n["or_ssid"]
-    tmpl = wlan_template(mist, n["or_template"], site, n["site"], dry)
-    if any(x.get("ssid") == ssid and x.get("template_id") == tmpl["id"] for x in mist.list("wlans")):
-        log("exists", "SSID", ssid, f"in {n['or_template']}")
-    elif dry:
-        log("would create", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz, high-density, 802.11r, isolated")
-    else:
-        obj = mist.create("wlans", {
-            "ssid": ssid, "enabled": True, "template_id": tmpl["id"],
-            "auth": {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False,
-                     "eap_reauth": False, "multi_psk_only": False, "private_wlan": False},
-            "auth_servers": [], "mist_nac": {"enabled": True},
-            "hotspot20": {"enabled": True, "operators": OPENROAMING_OPERATORS},
-            **WLAN_BEST_PRACTICE, **CLIENT_ISOLATION, "roam_mode": "11r", "disable_11be": False})
-        STATE.record("mist", "wlans", obj["id"], ssid)
-        log("created", "SSID", ssid, "Passpoint / OpenRoaming 802.1X, WPA3 + WPA2, 2.4/5/6 GHz, high-density, 802.11r, isolated")
-
     sso = mist_ensure(mist, "ssos", "identity provider", n["or_idp"],
                       {"name": n["or_idp"], "idp_type": "openroaming", "openroaming_ssids": [ssid]},
                       dry, f"OpenRoaming federation for {ssid}")
-    if sso["id"] != DRY:
-        if sso.get("openroaming_ssids") != [ssid] and not dry:
-            mist.update("ssos", sso["id"], {"openroaming_ssids": [ssid]})
-            log("updated", "identity provider", n["or_idp"], f"SSID {ssid}")
-        nac = dict(mist.req("GET", f"{mist.org}/setting").get("mist_nac") or {})
-        if not any(i.get("id") == sso["id"] for i in nac.get("idps", [])):
-            if dry:
-                log("would add", "Access Assurance IdP", n["or_idp"], "no user realms")
-            else:
-                nac["idps"] = nac.get("idps", []) + [{"id": sso["id"], "user_realms": []}]
-                mist.req("PUT", f"{mist.org}/setting", {"mist_nac": nac})
-                log("added", "Access Assurance IdP", n["or_idp"], "no user realms")
+    if sso["id"] == DRY:
+        return
+    if sso.get("openroaming_ssids") != [ssid] and not dry:
+        mist.update("ssos", sso["id"], {"openroaming_ssids": [ssid]})
+        log("updated", "identity provider", n["or_idp"], f"SSID {ssid}")
+    nac = dict(mist.req("GET", f"{mist.org}/setting").get("mist_nac") or {})
+    if not any(i.get("id") == sso["id"] for i in nac.get("idps", [])):
+        if dry:
+            log("would add", "Access Assurance IdP", n["or_idp"], "no user realms")
+        else:
+            nac["idps"] = nac.get("idps", []) + [{"id": sso["id"], "user_realms": []}]
+            mist.req("PUT", f"{mist.org}/setting", {"mist_nac": nac})
+            log("added", "Access Assurance IdP", n["or_idp"], "no user realms")
 
-    tag = mist_ensure(mist, "nactags", "NAC label", n["or_tag"],
-                      {"name": n["or_tag"], "type": "match", "match": "ssid", "values": [ssid]},
-                      dry, f"matches SSID {ssid}")
-    mist_ensure(mist, "nacrules", "auth policy rule", n["or_rule"],
-                {"name": n["or_rule"], "action": "allow", "enabled": True, "order": 2,
-                 "matching": {"nactags": [tag["id"]]}},
-                dry, f"SSID {ssid} -> allow")
+
+def role_tag(mist, tag_name, role, dry):
+    """A RADIUS-group NAC label: Access Assurance returns it and the Mist AP uses it as the client's role."""
+    return mist_ensure(mist, "nactags", "NAC label", tag_name,
+                       {"name": tag_name, "type": "radius_group", "radius_group": role},
+                       dry, f"assigns role '{role}'")
+
+
+def rule_with_role(mist, name, body, role_tag_obj, role, dry, explain):
+    """Create the rule with the role label applied, or add the label to an existing rule."""
+    rule = mist_ensure(mist, "nacrules", "auth policy rule", name,
+                       {**body, "apply_tags": [role_tag_obj["id"]]}, dry, explain)
+    if rule["id"] != DRY and role_tag_obj["id"] not in (rule.get("apply_tags") or []):
+        if dry:
+            log("would set", "auth policy rule", name, f"role '{role}'")
+        else:
+            rule = mist.update("nacrules", rule["id"], {"apply_tags": (rule.get("apply_tags") or []) + [role_tag_obj["id"]]})
+            log("set", "auth policy rule", name, f"role '{role}'")
+    return rule
+
+
+def step_nac(mist, n, dry):
+    """Access Assurance policy: every NAC label and rule, each rule returning its role."""
+    tag = mist_ensure(mist, "nactags", "NAC label", n["nac_tag"],
+                      {"name": n["nac_tag"], "type": "match", "match": "idp_role", "values": [n["group"]]},
+                      dry, f"matches Entra group '{n['group']}'")
+    role = role_tag(mist, n["corp_role_tag"], n["corp_role"], dry)
+    rule_with_role(mist, n["nac_rule"],
+                   {"name": n["nac_rule"], "action": "allow", "enabled": True, "order": 1,
+                    "matching": {"auth_type": "eap-tls", "nactags": [tag["id"]]}},
+                   role, n["corp_role"], dry, f"EAP-TLS certificate + Entra group member -> allow, role '{n['corp_role']}'")
+    if n["or_enabled"]:
+        ssid = n["or_ssid"]
+        tag = mist_ensure(mist, "nactags", "NAC label", n["or_tag"],
+                          {"name": n["or_tag"], "type": "match", "match": "ssid", "values": [ssid]},
+                          dry, f"matches SSID {ssid}")
+        role = role_tag(mist, n["or_role_tag"], n["or_role"], dry)
+        rule_with_role(mist, n["or_rule"],
+                       {"name": n["or_rule"], "action": "allow", "enabled": True, "order": 2,
+                        "matching": {"nactags": [tag["id"]]}},
+                       role, n["or_role"], dry, f"SSID {ssid} -> allow, role '{n['or_role']}'")
+
+
+def step_wxlan(mist, n, dry):
+    """Org WxLAN labels + a policy in the PSK SSID's WLAN template: users whose PSK carries the
+    isolated role may reach the internet but not the local network."""
+    if not n["iso_enabled"]:
+        log("note", "isolated BYOD", "off", "[psk_portal_isolated] enabled = false (or no section)")
+        return
+    users = mist_ensure(mist, "wxtags", "WxLAN label", n["iso_user_tag"],
+                        {"name": n["iso_user_tag"], "type": "match", "match": "radius_group", "op": "in",
+                         "values": [n["iso_role"]]}, dry, f"PSK role '{n['iso_role']}'")
+    internet = mist_ensure(mist, "wxtags", "WxLAN label", n["internet_tag"],
+                           {"name": n["internet_tag"], "type": "match", "match": "ip_range_subnet", "op": "in",
+                            "values": ["0.0.0.0/0"]}, dry, "0.0.0.0/0")
+    local = mist_ensure(mist, "wxtags", "WxLAN label", n["local_tag"],
+                        {"name": n["local_tag"], "type": "match", "match": "ip_range_subnet", "op": "in",
+                         "values": ["192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"]}, dry, "RFC 1918 subnets")
+    what = f"{n['iso_user_tag']} -> allow {n['internet_tag']}, deny {n['local_tag']}"
+    tmpl = mist.find("templates", n["psk_template"])
+    if not tmpl:
+        log("would create" if dry else "WARNING", "template policy", what,
+            "" if dry else f"WLAN template '{n['psk_template']}' not found")
+        return
+    rule = next((x for x in mist.list("wxrules") if x.get("template_id") == tmpl["id"]
+                 and x.get("src_wxtags") == [users["id"]]), None)
+    if rule:
+        log("exists", "template policy", what, f"in {n['psk_template']}")
+    elif dry:
+        log("would create", "template policy", what, f"in {n['psk_template']}")
+    else:
+        rule = mist.create("wxrules", {"template_id": tmpl["id"], "order": 1, "enabled": True, "action": "allow",
+                                       "src_wxtags": [users["id"]], "dst_wxtags": [],
+                                       "dst_allow_wxtags": [internet["id"]], "dst_deny_wxtags": [local["id"]]})
+        STATE.record("mist", "wxrules", rule["id"], what)
+        log("created", "template policy", what, f"in {n['psk_template']}")
 
 
 def portal_sso(tenant_id, cert_b64):
@@ -1018,31 +1092,38 @@ def portal_sso(tenant_id, cert_b64):
             "idp_sign_algo": "sha256", "nameid_format": "email"}
 
 
-def step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry):
+def step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry,
+                    name=None, role=None, app=None, vlan_id=None):
+    """A BYOD PSK portal on the PSK SSID. Defaults: [psk_portal]; the isolated portal passes its own
+    name, role, Entra app and VLAN, and shares the other [psk_portal] settings."""
     p = cfg["psk_portal"]
-    body = {"name": n["psk_portal"], "type": "byod", "auth": "sso", "ssid": n["psk_ssid"],
+    name, role, app = name or n["psk_portal"], role or n["psk_role"], app or n["entra_psk_app"]
+    body = {"name": name, "type": "byod", "auth": "sso", "ssid": n["psk_ssid"],
             "expire_time": p.getint("expire_days", fallback=365) * 1440,
             "max_usage": p.getint("max_usage", fallback=0),
             # demo: no e-mail is collected or sent
             "required_fields": [], "notify_expiry": False, "notify_on_create_or_edit": False,
             "passphrase_rules": {"length": p.getint("passphrase_length", fallback=12),
-                                 "alphaberts_enabled": True, "numerics_enabled": True, "symbols_enabled": False},
+                                 "alphabets_enabled": True, "numerics_enabled": True, "symbols_enabled": False},
+            "role": role,
             "sso": {**portal_sso(tenant_id, None), "use_sso_role_for_psk_role": False}}
-    vlan = int_or_none(cfg["wlan"].get("psk_vlan_id"))
+    vlan = int_or_none(vlan_id or cfg["wlan"].get("psk_vlan_id"))
     if vlan:
         body["vlan_id"] = vlan
-    portal = mist_ensure(mist, "pskportals", "PSK portal", n["psk_portal"], body, dry,
-                         f"BYOD self-service for {n['psk_ssid']}, no e-mail")
+    portal = mist_ensure(mist, "pskportals", "PSK portal", name, body, dry,
+                         f"BYOD self-service for {n['psk_ssid']}, no e-mail, role '{role}'"
+                         + (f", VLAN {vlan}" if vlan else ""))
     sso_url = portal.get("portal_sso_url") or f"https://{mist.cloud}/api/v1/pskportal/{portal['id']}/saml/login"
-    cert = entra_saml_app(g, session, tenant_id, n["entra_psk_app"], sso_url, group,
+    cert = entra_saml_app(g, session, tenant_id, app, sso_url, group,
                           cfg["entra"].getfloat("saml_cert_months", fallback=36), dry, policies)
     if cert and not dry:
         body["sso"] = {**portal_sso(tenant_id, cert), "use_sso_role_for_psk_role": False}
         if (portal.get("sso", {}).get("idp_cert") != body["sso"]["idp_cert"]
-                or any(portal.get(k) != body[k] for k in ("required_fields", "notify_expiry",
-                                                          "notify_on_create_or_edit", "ssid"))):
+                or any(portal.get(k) != body[k] for k in ("required_fields", "notify_expiry", "role",
+                                                          "notify_on_create_or_edit", "ssid", "passphrase_rules"))
+                or portal.get("vlan_id") != body.get("vlan_id")):
             portal = mist.update("pskportals", portal["id"], body)
-            log("set", "PSK portal sign-in", n["psk_portal"], "Entra ID SAML (issuer + signing cert)")
+            log("set", "PSK portal", name, f"Entra ID SAML sign-in, role '{role}', passphrase rules")
     return portal
 
 
@@ -1050,20 +1131,23 @@ def step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry):
     c = cfg["cert_portal"]
     body = {"name": n["cert_portal"], "type": "marvis_client", "auth": "sso", "ssid": n["cert_ssid"],
             "access_type": c.get("access_type", "wireless").strip(),
-            "eap_type": c.get("eap_type", "wpa2").strip(),
+            "eap_type": c.get("eap_type", "wpa3").strip().lower(),
             "cert_expire_time": c.getint("cert_expire_days", fallback=365),
             "notify_expiry": False,
             "sso": {**portal_sso(tenant_id, None), "use_sso_role_for_cert": False}}
+    if body["eap_type"] not in ("wpa2", "wpa3"):
+        raise BuildError("[cert_portal] eap_type must be wpa2 or wpa3")
     portal = mist_ensure(mist, "nacportals", "certificate portal", n["cert_portal"], body, dry,
-                         f"Marvis Client onboarding for {n['cert_ssid']}")
+                         f"Marvis Client onboarding for {n['cert_ssid']}, {body['eap_type'].upper()}")
     sso_url = portal.get("portal_sso_url") or f"https://{mist.cloud}/api/v1/nacportal/{portal['id']}/saml/login"
     cert = entra_saml_app(g, session, tenant_id, n["entra_cert_app"], sso_url, group,
                           cfg["entra"].getfloat("saml_cert_months", fallback=36), dry, policies)
     if cert and not dry:
         body["sso"] = {**portal_sso(tenant_id, cert), "use_sso_role_for_cert": False}
-        if portal.get("sso", {}).get("idp_cert") != body["sso"]["idp_cert"] or portal.get("ssid") != body["ssid"]:
+        if (portal.get("sso", {}).get("idp_cert") != body["sso"]["idp_cert"]
+                or any(portal.get(k) != body[k] for k in ("ssid", "eap_type"))):
             portal = mist.update("nacportals", portal["id"], body)
-            log("set", "certificate portal sign-in", n["cert_portal"], "Entra ID SAML (issuer + signing cert)")
+            log("set", "certificate portal", n["cert_portal"], f"Entra ID SAML sign-in, {body['eap_type'].upper()} profile")
     return portal
 
 
@@ -1100,7 +1184,7 @@ def build(cfg, mist, g, session, args):
     global RUN
     dry = args.dry_run
     n = names(cfg)
-    RUN = Run(12, pause=args.pause)
+    RUN = Run(11, pause=args.pause)
     started = datetime.now()
 
     RUN.stage("Connect to Entra ID and Mist",
@@ -1133,10 +1217,15 @@ def build(cfg, mist, g, session, args):
         })
         log("set", "snapshot", os.path.basename(STATE.path), "used by --teardown to restore everything")
 
-    RUN.stage("Prepare the demo site",
-              "Rename the site, set its address and upload its floorplan so the demo looks real.")
-    site = step_site(mist, cfg, n, site, dry)
-    step_floorplan(mist, cfg, n, site, args.ini, dry)
+    if args.site:
+        RUN.stage("Prepare the demo site",
+                  "Rename the site, set its address and upload its floorplan so the demo looks real.")
+        site = step_site(mist, cfg, n, site, dry)
+        step_floorplan(mist, cfg, n, site, args.ini, dry)
+    else:
+        RUN.stage("Demo site: left as it is",
+                  "Networks only: the site keeps its name, address and floorplan; the SSIDs are applied to it.")
+        log("note", "site", site["name"], "networks only - not renamed, no floorplan uploaded")
 
     RUN.stage("Entra ID: register Mist as an application",
               "Mist Access Assurance needs an Entra app to read users, groups and devices via Microsoft Graph.")
@@ -1146,38 +1235,45 @@ def build(cfg, mist, g, session, args):
               "Only members of this group may use the portals and get Wi-Fi access.")
     group = step_group(g, cfg, n, dry)
 
-    RUN.stage("Mist: connect Access Assurance to Entra ID",
-              "Add Entra ID as an identity provider and route the tenant's domains to it.")
-    step_mist_idp(mist, g, cfg, n, tenant_id, realms, idp_app, args)
+    RUN.stage("Entra ID: SAML settings for Mist portals",
+              "Sign the whole SAML response and send the user's UPN as their e-mail-format ID - both required by Mist.")
+    policies = step_saml_policies(g, dry)
 
     RUN.stage("Mist: turn on the internal certificate authority",
               "Mist's onboard CA issues each onboarded device its own client certificate.")
     step_internal_ca(mist, dry)
 
     RUN.stage("Mist: create the SSIDs",
-              f"{n['psk_ssid']} uses a personal passphrase per user; {n['cert_ssid']} uses certificates (802.1X). "
-              "Each SSID has its own WLAN template, and both are applied to the demo site.")
+              f"{n['psk_ssid']} uses a personal passphrase per user; {n['cert_ssid']} uses certificates (802.1X)"
+              + (f"; {n['or_ssid']} is a Passpoint SSID for OpenRoaming visitors" if n["or_enabled"] else "")
+              + ". Each SSID has its own WLAN template, applied to the demo site.")
     step_wlans(mist, cfg, n, site, dry)
 
-    RUN.stage("Mist: authentication policy",
-              "Allow a device on the secure SSID only if its certificate is valid AND the user is in the Entra group.")
+    RUN.stage("Mist: identity providers",
+              "Add Entra ID and route the tenant's domains to it"
+              + ("; add OpenRoaming so visitors with an OpenRoaming identity are recognised" if n["or_enabled"] else "")
+              + ".")
+    step_mist_idp(mist, g, cfg, n, tenant_id, realms, idp_app, args)
+    step_openroaming_idp(mist, n, dry)
+
+    RUN.stage("Mist: Access Assurance policy",
+              f"Allow {n['cert_ssid']} only with a valid certificate AND Entra group membership (role "
+              f"'{n['corp_role']}')" + (f"; allow {n['or_ssid']} by SSID (role '{n['or_role']}')" if n["or_enabled"] else "")
+              + ". PSK joins don't use these rules.")
     step_nac(mist, n, dry)
 
-    RUN.stage("Mist: OpenRoaming",
-              f"A Passpoint SSID ({n['or_ssid']}) where visitors join automatically with an OpenRoaming identity "
-              "(e.g. from their phone or Google/Apple account); Access Assurance allows them by SSID.")
-    step_openroaming(mist, n, site, dry)
+    RUN.stage("Mist: WxLAN policy",
+              f"Users whose PSK carries the role '{n['iso_role']}' reach the internet but not the local network.")
+    step_wxlan(mist, n, dry)
 
-    RUN.stage("Entra ID: SAML settings for Mist portals",
-              "Sign the whole SAML response and send the user's UPN as their e-mail-format ID - both required by Mist.")
-    policies = step_saml_policies(g, dry)
-
-    RUN.stage("PSK self-service portal",
-              "Users sign in with Entra ID and get their own Wi-Fi passphrase and QR code.")
+    RUN.stage("Onboarding portals",
+              "Users sign in with Entra ID. The PSK portals give each user their own passphrase and QR code; "
+              "the certificate portal's Marvis Client app installs a certificate and Wi-Fi profile.")
     psk = step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry)
-
-    RUN.stage("Certificate onboarding portal",
-              "Users sign in with Entra ID; the Marvis Client app installs a certificate and Wi-Fi profile.")
+    iso = None
+    if n["iso_enabled"]:
+        iso = step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry, name=n["iso_portal"],
+                              role=n["iso_role"], app=n["entra_iso_app"], vlan_id=n["iso_vlan"])
     cert_portal = step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry)
     RUN.end()
 
@@ -1212,6 +1308,10 @@ def build(cfg, mist, g, session, args):
         "portals": [
             {"title": "Wi-Fi passphrase (PSK)", "url": psk.get("ui_url", ""), "ssid": n["psk_ssid"],
              "how": "Sign in with Entra ID, then scan the QR code shown or type the passphrase."},
+        ] + ([
+            {"title": "Isolated PSK (internet only)", "url": iso.get("ui_url", ""), "ssid": n["psk_ssid"],
+             "how": "As the PSK portal, but devices can reach only the internet, not the local network."},
+        ] if iso else []) + [
             {"title": "Certificate onboarding", "url": cert_portal.get("ui_url", ""), "ssid": n["cert_ssid"],
              "how": "Sign in with Entra ID, install the Marvis Client app, then tap Install Network Profile."},
         ],
@@ -1221,6 +1321,8 @@ def build(cfg, mist, g, session, args):
     })
     print(_c("1;32", "━━ Demo environment ready " + "━" * 40))
     print(f"   PSK portal:          {psk.get('ui_url', '-')}")
+    if iso:
+        print(f"   Isolated PSK portal: {iso.get('ui_url', '-')}")
     print(f"   Certificate portal:  {cert_portal.get('ui_url', '-')}")
     print(f"   Report with QR codes: {out}")
     print(f"   Audit log:            {AUDIT_LOG}")
@@ -1282,14 +1384,16 @@ def teardown(cfg, mist, g, args):
     if setting.get("mist_nac") != nac:
         mist.req("PUT", f"{mist.org}/setting", {"mist_nac": nac})
         log("restored", "Access Assurance IdP settings", "realm mapping / default IdP")
-    for c in reversed([c for c in created if c["system"] == "mist"]):
+    # Newest first, but NAC labels last: a rule may have been given a label added on a later run.
+    for c in sorted(reversed([c for c in created if c["system"] == "mist"]), key=lambda c: c["kind"] == "nactags"):
         if c["kind"] == "maps":
             mist.req("DELETE", f"{mist.base}/sites/{c['site_id']}/maps/{c['id']}", ok404=True)
         else:
             mist.delete(c["kind"], c["id"])
         log("deleted", {"ssos": "identity provider", "templates": "WLAN template", "wlans": "SSID",
                         "nactags": "NAC label", "nacrules": "auth policy rule", "pskportals": "PSK portal",
-                        "nacportals": "certificate portal", "maps": "floorplan"}.get(c["kind"], c["kind"]), c["name"])
+                        "nacportals": "certificate portal", "maps": "floorplan",
+                        "wxtags": "WxLAN label", "wxrules": "template policy"}.get(c["kind"], c["kind"]), c["name"])
 
     RUN.stage("Mist: restore the internal CA and site", "Put the CA and the site back exactly as they were.")
     if not ca_was:
@@ -1344,6 +1448,55 @@ def teardown(cfg, mist, g, args):
 
 
 # --------------------------------------------------------------------------- main
+def build_summary(cfg, n, with_site=None):
+    """Short plan of the build, shown before anything connects."""
+    s, e = cfg["site"], cfg["entra"]
+    plan = (s.get("floorplan", "") or "").strip()
+    plan = ("no floorplan" if plan.lower() in ("none", "off", "no")
+            else f"floorplan '{plan}'" if plan else "the built-in sample floorplan")
+    ssids = [f"{n['psk_ssid']} (Multi-PSK)", f"{n['cert_ssid']} (802.1X)"] + \
+            ([f"{n['or_ssid']} (OpenRoaming)"] if n["or_enabled"] else [])
+    portals = [n["psk_portal"]] + ([n["iso_portal"]] if n["iso_enabled"] else []) + [n["cert_portal"]]
+    users = csv_list(e.get("demo_users"))
+    lines = [
+        f"Entra ID ({e.get('tenant', '').strip()}): '{n['prefix']} ...' apps, group '{n['group']}'"
+        + (f" with {len(users)} demo user{'s' if len(users) != 1 else ''}" if users else "") + ", SAML policies",
+        ("Demo site: left as it is (networks only)" if with_site is False else
+         ("Demo site (your choice below): " if with_site is None else "Demo site: ")
+         + f"rename '{s.get('current_name', '').strip()}' to '{n['site']}', set its address and upload {plan}"),
+        f"SSIDs: {', '.join(ssids)}",
+        "Identity providers: " + n["mist_idp"] + (f", {n['or_idp']}" if n["or_enabled"] else ""),
+        f"Access Assurance roles: {n['corp_role']}" + (f", {n['or_role']}" if n["or_enabled"] else "")
+        + (f"; WxLAN policy: {n['iso_role']} = internet only" if n["iso_enabled"] else ""),
+        f"Portals: {', '.join(portals)}",
+    ]
+    print(_c("1", "\nAbout to build:"))
+    for line in lines:
+        print(f"   • {line}")
+
+
+def choose_scope(args, cfg, n):
+    """Site + floorplan + networks, or networks only. Asks unless --with-site / --networks-only."""
+    if args.with_site or args.networks_only:
+        build_summary(cfg, n, args.with_site)
+        choice = "networks only" if args.networks_only else "site, floorplan and networks"
+        print(f"\n   Building: {choice} (from the command line)\n")
+        return args.with_site
+    build_summary(cfg, n)
+    if not sys.stdin.isatty():
+        raise BuildError("no terminal to ask on - pass --with-site or --networks-only")
+    print("\n   1  Site, floorplan and networks  (rename the site and upload the plan)")
+    print("   2  Networks only  (leave the site's name, address and plan as they are)")
+    while True:
+        a = input("\nWhat should I build? [1/2, Enter = 1, q = quit]: ").strip().lower()
+        if a in ("", "1"):
+            return True
+        if a == "2":
+            return False
+        if a in ("q", "quit"):
+            raise KeyboardInterrupt
+
+
 def main():
     global STATE, AUDIT_LOG
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1354,13 +1507,19 @@ def main():
                     help="new Entra client secret pushed to the existing Mist identity provider")
     ap.add_argument("--teardown", action="store_true", help="undo the demo using the saved snapshot")
     ap.add_argument("--yes", action="store_true", help="teardown without the confirmation prompt")
+    scope = ap.add_mutually_exclusive_group()
+    scope.add_argument("--with-site", action="store_true",
+                       help="build the demo site and floorplan too, without asking")
+    scope.add_argument("--networks-only", action="store_true",
+                       help="build only the networks (SSIDs, policy, portals); leave the site as it is")
     args = ap.parse_args()
     try:
         cfg = load_config(args.ini)
-        names(cfg)  # fail fast on over-long Mist names
+        n = names(cfg)  # fail fast on over-long Mist names
         AUDIT_LOG = start_audit_log(cfg, args.ini, "teardown" if args.teardown else
                                     "dry-run" if args.dry_run else "build", sys.argv)
         print(_c("2", f"Audit log: {AUDIT_LOG}"))
+        args.site = False if args.teardown else choose_scope(args, cfg, n)
         STATE = State(os.path.splitext(os.path.abspath(args.ini))[0] + ".state.json", dry=args.dry_run)
         session = build_session(cfg)
         cloud, token = mist_credentials(cfg)
