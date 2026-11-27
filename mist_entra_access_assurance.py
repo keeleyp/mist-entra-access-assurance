@@ -296,6 +296,8 @@ def names(cfg):
     n["iso_vlan"] = (i.get("vlan_id", "") or "").strip()
     n["entra_iso_app"] = f"{prefix} PSK Portal Isolated"
     n["iso_user_tag"], n["internet_tag"], n["local_tag"] = "Isolated BYOD Users", "Internet", "Local Network"
+    # Sample PSKs (one per PSK role) shown as Wi-Fi QR codes in the report.
+    n["samples_enabled"] = cfg.getboolean("sample_psks", "enabled", fallback=False)
     if n["iso_enabled"] and (n["iso_portal"] == n["psk_portal"] or n["iso_role"] == n["psk_role"]):
         raise BuildError("[psk_portal_isolated] name and role must differ from [psk_portal]")
     # Optional OpenRoaming SSID ([openroaming] enabled = true)
@@ -921,12 +923,14 @@ def step_wlans(mist, cfg, n, site, dry):
                           "private_wlan": False}},
          "WPA2 Multi-PSK via Access Assurance (2.4/5 GHz) - every user gets their own passphrase; "
          "high-density rates, clients isolated (same subnet)")
+    # Corp 802.1X: WPA3-Enterprise only (no WPA3+WPA2 transition), to match the WPA3 profile the
+    # certificate portal installs.
     wlan(n["cert_ssid"], n["cert_template"],
-         {"type": "eap", "pairwise": ["wpa3", "wpa2-ccmp"], "enable_mac_auth": False, "eap_reauth": False,
+         {"type": "eap", "pairwise": ["wpa3"], "enable_mac_auth": False, "eap_reauth": False,
           "multi_psk_only": False, "private_wlan": False},
          int_or_none(w.get("cert_vlan_id")),
          {**WLAN_BEST_PRACTICE, "roam_mode": "11r", "disable_11be": True, "auth_servers": [], "mist_nac": {"enabled": True}},
-         "WPA3/WPA2-Enterprise 802.1X, authenticated by Mist Access Assurance; high-density rates, 802.11r")
+         "WPA3-Enterprise 802.1X (no WPA2), authenticated by Mist Access Assurance; high-density rates, 802.11r")
     # OpenRoaming: Passpoint (Hotspot 2.0) 802.1X guest SSID, modelled on a working home-org setup.
     if n["or_enabled"]:
         wlan(n["or_ssid"], n["or_template"],
@@ -1137,6 +1141,45 @@ def step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry,
     return portal
 
 
+PASSPHRASE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"  # no 0/O, 1/l/I
+
+
+def step_sample_psks(mist, cfg, n, dry):
+    """One ready-made PSK per PSK role on the PSK SSID, for the report's Wi-Fi QR codes.
+    No device limit and no expiry unless [sample_psks] says otherwise. Teardown deletes them
+    with every other PSK on the demo SSID."""
+    if not n["samples_enabled"]:
+        log("note", "sample PSKs", "off", "[sample_psks] enabled = false (or no section)")
+        return []
+    c = cfg["sample_psks"]
+    max_usage = c.getint("max_usage", fallback=0)
+    expire_days = c.getint("expire_days", fallback=0)
+    roles = [(n["psk_role"], "Corporate BYOD access")]
+    if n["iso_enabled"]:
+        roles.append((n["iso_role"], "Internet only - no local network"))
+    out = []
+    for role, access in roles:
+        name = f"Sample-{role}"
+        body = {"name": name, "ssid": n["psk_ssid"], "role": role, "usage": "multi", "max_usage": max_usage,
+                "passphrase": "".join(secrets.choice(PASSPHRASE_CHARS) for _ in range(12))}
+        if expire_days:
+            body["expire_time"] = int(time.time()) + expire_days * 86400
+        limits = (f"{max_usage} devices" if max_usage else "unlimited devices") + \
+                 (f", expires in {expire_days} days" if expire_days else ", no expiry")
+        psk = mist.find("psks", name)
+        if psk:
+            log("exists", "sample PSK", name, f"role '{role}'")
+        elif dry:
+            log("would create", "sample PSK", name, f"role '{role}', {limits}")
+            continue
+        else:
+            psk = mist.create("psks", body)
+            log("created", "sample PSK", name, f"role '{role}', {limits}")
+        out.append({"name": name, "role": role, "ssid": n["psk_ssid"], "access": access,
+                    "passphrase": psk.get("passphrase", ""), "limits": limits})
+    return out
+
+
 def step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry):
     c = cfg["cert_portal"]
     body = {"name": n["cert_portal"], "type": "marvis_client", "auth": "sso", "ssid": n["cert_ssid"],
@@ -1278,7 +1321,8 @@ def build(cfg, mist, g, session, args):
 
     RUN.stage("Onboarding portals",
               "Users sign in with Entra ID. The PSK portals give each user their own passphrase and QR code; "
-              "the certificate portal's Marvis Client app installs a certificate and Wi-Fi profile.")
+              "the certificate portal's Marvis Client app installs a certificate and Wi-Fi profile"
+              + ("; sample PSKs for the report's Wi-Fi QR codes" if n["samples_enabled"] else "") + ".")
     psk = step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry)
     iso = None
     if n["iso_enabled"]:
@@ -1286,6 +1330,7 @@ def build(cfg, mist, g, session, args):
                               role=n["iso_role"], app=n["entra_iso_app"], vlan_id=n["iso_vlan"],
                               section="psk_portal_isolated")
     cert_portal = step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry)
+    samples = step_sample_psks(mist, cfg, n, dry)
     RUN.end()
 
     print()
@@ -1326,6 +1371,7 @@ def build(cfg, mist, g, session, args):
             {"title": "Certificate onboarding", "url": cert_portal.get("ui_url", ""), "ssid": n["cert_ssid"],
              "how": "Sign in with Entra ID, install the Marvis Client app, then tap Install Network Profile."},
         ],
+        "sample_psks": samples,
         "stages": stages, "started": datetime.fromisoformat(STATE.data["first_build"]),
         "radius_note": None if warm else RADIUS_WARMUP.format(ssid=n["cert_ssid"]),
         "finished": datetime.now(),

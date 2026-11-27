@@ -14,13 +14,15 @@ The build prints one banner per step, with a one-line explanation and a ✓ for 
 | 4. Entra group | Onboarding security group, with the demo users added |
 | 5. Entra SAML | Policies that sign the whole SAML response and send the UPN as the NameID in email format. Mist requires both |
 | 6. Internal CA | Turns on the Mist onboard CA for BYOD certificates |
-| 7. SSIDs | Every SSID, each in its own WLAN template applied to the demo site: a WPA2 Multi-PSK (BYOD, 2.4/5 GHz) SSID whose PSKs Access Assurance looks up (WPA2 because the Mist PSK portal editor does not list WPA3 RADIUS-PSK WLANs); a WPA3/WPA2 802.1X SSID on Mist NAC; and, if `[openroaming] enabled`, a Passpoint (Hotspot 2.0) OpenRoaming SSID. Best practice: high-density data rates everywhere, 802.11r on the 802.1X SSIDs (Multi-PSK has no Fast Roaming), client isolation (same subnet) on the BYOD and OpenRoaming SSIDs |
+| 7. SSIDs | Every SSID, each in its own WLAN template applied to the demo site: a WPA2 Multi-PSK (BYOD, 2.4/5 GHz) SSID whose PSKs Access Assurance looks up (WPA2 because the Mist PSK portal editor does not list WPA3 RADIUS-PSK WLANs); a WPA3-only 802.1X SSID on Mist NAC (no WPA2 transition); and, if `[openroaming] enabled`, a Passpoint (Hotspot 2.0) OpenRoaming SSID. Best practice: high-density data rates everywhere, 802.11r on the 802.1X SSIDs (Multi-PSK has no Fast Roaming), client isolation (same subnet) on the BYOD and OpenRoaming SSIDs |
 | 8. Identity providers | Entra ID as an OAuth/Azure identity provider using a fresh client secret (never shown), with realm mapping and the default IdP; plus an OpenRoaming identity provider for the OpenRoaming SSID |
 | 9. Access Assurance policy | NAC labels and rules: *EAP-TLS + Entra group → allow*, returning role `[nac] role` (default **Corp**); *OpenRoaming SSID → allow*, returning `[openroaming] role` (default **Guest**). Roles are RADIUS-group labels. Multi-PSK joins do not use these rules |
 | 10. WxLAN policy | If `[psk_portal_isolated] enabled`: org labels *Isolated BYOD Users* (role **BYoD_Isolated**), *Internet* (0.0.0.0/0) and *Local Network* (RFC 1918), and a policy in the PSK SSID's WLAN template: *Isolated BYOD Users → allow Internet, deny Local Network* |
-| 11. Portals | Each with Entra SSO and its own SAML app: the BYOD **PSK Self-Service** portal (role **BYOD**, no email collection or notifications); the **BYoD_Isolated** PSK portal on the same SSID (role **BYoD_Isolated**, optional VLAN); and the Marvis Client **certificate onboarding** portal, which installs a WPA3 profile (`[cert_portal] eap_type`) |
+| 11. Portals | Each with Entra SSO and its own SAML app: the BYOD **PSK Self-Service** portal (role **BYOD**, no email collection or notifications); the **BYoD_Isolated** PSK portal on the same SSID (role **BYoD_Isolated**, optional VLAN); and the Marvis Client **certificate onboarding** portal, which installs a WPA3 profile (`[cert_portal] eap_type`). With `[sample_psks] enabled`, also one sample PSK per role (Sample-BYOD, Sample-BYoD_Isolated; unlimited devices, no expiry by default), shown as Wi-Fi QR codes on their own page of the report |
 
-When the build finishes, it writes a **Word report** with both portal QR codes and every action taken.
+When the build finishes, it writes a **Word report** with a QR code for every portal, a page of Wi-Fi QR codes for the sample PSKs, and every action taken.
+
+A PDF copy of this README with example screenshots is in [docs/README.pdf](docs/README.pdf) (regenerate it with `python3 docs/make_readme_pdf.py`).
 
 Every run (build, dry-run or teardown) also writes an **audit log**: the same output as the screen, without colours and with a time on each line. Both file names carry the run's timestamp, so each run keeps its own copy:
 

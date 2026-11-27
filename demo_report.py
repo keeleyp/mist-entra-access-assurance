@@ -5,6 +5,7 @@ from datetime import datetime
 import qrcode
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_BREAK
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -22,6 +23,53 @@ def _qr_png(url):
     q.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
     buf.seek(0)
     return buf
+
+
+def _wifi_qr_text(ssid, passphrase):
+    """Standard Wi-Fi QR payload (scanned by iOS/Android cameras); backslash, semicolon, comma,
+    colon and double quote are escaped with a backslash."""
+    esc = lambda v: "".join("\\" + ch if ch in '\\;,:"' else ch for ch in v)
+    return f"WIFI:T:WPA;S:{esc(ssid)};P:{esc(passphrase)};;"
+
+
+def _sample_psk_page(doc, samples):
+    doc.paragraphs[-1].add_run().add_break(WD_BREAK.PAGE)
+    doc.add_heading("Join the Wi-Fi with a sample passphrase", level=1)
+    doc.add_paragraph("Point a phone camera at a code and tap the prompt to join - no portal or "
+                      "sign-in needed. Each passphrase carries a role, so the two codes join the "
+                      "same SSID with different access.")
+    col = 174 / len(samples)
+    t = doc.add_table(rows=1, cols=len(samples))
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, sp in enumerate(samples):
+        cell = t.rows[0].cells[i]
+        cell.text = ""
+        hp = cell.paragraphs[0]
+        hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = hp.add_run(f"Role: {sp['role']}")
+        r.bold = True
+        r.font.size = Pt(13)
+        r.font.color.rgb = RGBColor.from_string(ACCENT)
+        ap = cell.add_paragraph(sp["access"])
+        ap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        ip = cell.add_paragraph()
+        ip.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        ip.add_run().add_picture(_qr_png(_wifi_qr_text(sp["ssid"], sp["passphrase"])), width=Mm(min(62, col - 8)))
+        for label, value in (("SSID", sp["ssid"]), ("Passphrase", sp["passphrase"]), ("PSK name", sp["name"]),
+                             ("Limits", sp["limits"])):
+            lp = cell.add_paragraph()
+            lp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            lp.paragraph_format.space_after = Pt(0)
+            lp.add_run(f"{label}: ").bold = True
+            vr = lp.add_run(value)
+            if label == "Passphrase":
+                vr.font.name = "Consolas"
+                vr.font.size = Pt(12)
+        cell.width = Mm(col)
+    _fixed_width(t, [col] * len(samples))
+    doc.add_paragraph()
+    doc.add_paragraph("These sample passphrases are shared and never expire unless the ini says otherwise. "
+                      "Teardown deletes them with every other PSK on the demo SSID.").runs[0].italic = True
 
 
 def _shade(cell, fill):
@@ -100,7 +148,7 @@ def write_report(path, ctx):
     """ctx keys: tenant_name, tenant_id, org_name, org_id, cloud, site{name,address},
     psk_ssid, cert_ssid, group, demo_users, portals[{title,url,ssid,how}],
     stages[{title,explain,secs,events[(status,kind,name,extra)]}], started, finished,
-    radius_note (optional)"""
+    radius_note (optional), sample_psks[{name,role,ssid,access,passphrase,limits}] (optional)"""
     doc = Document()
     _setup(doc)
 
@@ -190,6 +238,9 @@ def write_report(path, ctx):
         "run the script with --teardown. It uses the snapshot taken at the start of the build.",
     ):
         doc.add_paragraph(line, style="List Bullet")
+
+    if ctx.get("sample_psks"):
+        _sample_psk_page(doc, ctx["sample_psks"])
 
     doc.save(path)
     return path

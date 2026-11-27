@@ -125,6 +125,14 @@ eap_type = wpa3
 access_type = wireless
 cert_expire_days = 365
 
+[sample_psks]
+; One ready-made PSK per PSK role (Sample-<role>) on the PSK SSID, printed as Wi-Fi QR codes on
+; their own page of the report so clients can join without a portal.
+enabled = true
+; Devices per PSK (0 = unlimited) and days until it expires (0 = never).
+max_usage = 0
+expire_days = 0
+
 ; ---------------------------------------------------------------- Output
 [output]
 ; Relative paths are next to this ini. Each run adds a timestamp to the name, e.g.
