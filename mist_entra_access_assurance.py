@@ -138,7 +138,7 @@ def stamped(path, ts=RUN_TS):
 
 def start_audit_log(cfg, ini_path, mode, argv):
     p = cfg.get("output", "audit_log", fallback="").strip() if cfg.has_section("output") else ""
-    p = os.path.expanduser(p or "Mist_Access_Assurance_Audit.log")
+    p = os.path.expanduser(p or "Mist_AA_Audit.log")
     if not os.path.isabs(p):
         p = os.path.join(os.path.dirname(os.path.abspath(ini_path)), p)
     base, ext = os.path.splitext(p)
@@ -1093,17 +1093,26 @@ def portal_sso(tenant_id, cert_b64):
 
 
 def step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry,
-                    name=None, role=None, app=None, vlan_id=None):
+                    name=None, role=None, app=None, vlan_id=None, section="psk_portal"):
     """A BYOD PSK portal on the PSK SSID. Defaults: [psk_portal]; the isolated portal passes its own
-    name, role, Entra app and VLAN, and shares the other [psk_portal] settings."""
-    p = cfg["psk_portal"]
+    name, role, Entra app, VLAN and ini section. A blank or missing expire_days / max_usage /
+    passphrase_length in that section falls back to [psk_portal]."""
+    def setting(key, default):
+        for sec in (section, "psk_portal"):
+            v = cfg.get(sec, key, fallback="").strip() if cfg.has_section(sec) else ""
+            if v:
+                try:
+                    return int(v)
+                except ValueError:
+                    raise BuildError(f"[{sec}] {key} must be a whole number, not '{v}'")
+        return default
     name, role, app = name or n["psk_portal"], role or n["psk_role"], app or n["entra_psk_app"]
     body = {"name": name, "type": "byod", "auth": "sso", "ssid": n["psk_ssid"],
-            "expire_time": p.getint("expire_days", fallback=365) * 1440,
-            "max_usage": p.getint("max_usage", fallback=0),
+            "expire_time": setting("expire_days", 365) * 1440,
+            "max_usage": setting("max_usage", 0),
             # demo: no e-mail is collected or sent
             "required_fields": [], "notify_expiry": False, "notify_on_create_or_edit": False,
-            "passphrase_rules": {"length": p.getint("passphrase_length", fallback=12),
+            "passphrase_rules": {"length": setting("passphrase_length", 12),
                                  "alphabets_enabled": True, "numerics_enabled": True, "symbols_enabled": False},
             "role": role,
             "sso": {**portal_sso(tenant_id, None), "use_sso_role_for_psk_role": False}}
@@ -1120,6 +1129,7 @@ def step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry,
         body["sso"] = {**portal_sso(tenant_id, cert), "use_sso_role_for_psk_role": False}
         if (portal.get("sso", {}).get("idp_cert") != body["sso"]["idp_cert"]
                 or any(portal.get(k) != body[k] for k in ("required_fields", "notify_expiry", "role",
+                                                          "expire_time", "max_usage",
                                                           "notify_on_create_or_edit", "ssid", "passphrase_rules"))
                 or portal.get("vlan_id") != body.get("vlan_id")):
             portal = mist.update("pskportals", portal["id"], body)
@@ -1174,7 +1184,7 @@ def radius_ready(mist):
 def report_path(cfg, ini_path):
     p = cfg.get("output", "report", fallback="").strip() if cfg.has_section("output") else ""
     if not p:
-        p = "Mist_Access_Assurance_Demo_Report.docx"
+        p = "Mist_AA_Demo_Report.docx"
     p = os.path.expanduser(p)
     p = p if os.path.isabs(p) else os.path.join(os.path.dirname(os.path.abspath(ini_path)), p)
     return stamped(p)
@@ -1273,7 +1283,8 @@ def build(cfg, mist, g, session, args):
     iso = None
     if n["iso_enabled"]:
         iso = step_psk_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry, name=n["iso_portal"],
-                              role=n["iso_role"], app=n["entra_iso_app"], vlan_id=n["iso_vlan"])
+                              role=n["iso_role"], app=n["entra_iso_app"], vlan_id=n["iso_vlan"],
+                              section="psk_portal_isolated")
     cert_portal = step_cert_portal(mist, g, session, cfg, n, tenant_id, group, policies, dry)
     RUN.end()
 

@@ -24,8 +24,8 @@ When the build finishes, it writes a **Word report** with both portal QR codes a
 
 Every run (build, dry-run or teardown) also writes an **audit log**: the same output as the screen, without colours and with a time on each line. Both file names carry the run's timestamp, so each run keeps its own copy:
 
-- `Mist_Access_Assurance_Demo_Report_20261119-143005.docx`
-- `Mist_Access_Assurance_Audit_20261119-143005_build.log`
+- `Mist_AA_Demo_Report_20261119-143005.docx`
+- `Mist_AA_Audit_20261119-143005_build.log`
 
 Set the base names under `[output]` in the ini.
 

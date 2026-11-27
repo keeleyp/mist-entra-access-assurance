@@ -105,14 +105,17 @@ passphrase_length = 12
 ; A second PSK portal on the same PSK SSID (step 11). Its passphrases carry this role, and
 ; a WxLAN policy in the PSK SSID's WLAN template (step 10: org labels "Isolated BYOD Users",
 ; "Internet", "Local Network") lets those users reach the internet but not the local
-; network (RFC 1918 subnets). Expiry, devices per PSK and passphrase length come from
-; [psk_portal].
+; network (RFC 1918 subnets).
 enabled = true
 name = BYoD_Isolated
-; Must differ from [psk_portal] role.
+; Role stamped on every PSK the portal issues. Must differ from [psk_portal] role.
 role = BYoD_Isolated
+expire_days = 365
+; Devices per PSK (0 = unlimited).
+max_usage = 5
+passphrase_length = 12
 ; Optional VLAN for these clients. Blank = [wlan] psk_vlan_id.
-vlan_id = 
+vlan_id =
 
 [cert_portal]
 name = Certificate Onboarding
@@ -125,12 +128,12 @@ cert_expire_days = 365
 ; ---------------------------------------------------------------- Output
 [output]
 ; Relative paths are next to this ini. Each run adds a timestamp to the name, e.g.
-; Mist_Access_Assurance_Demo_Report_20261119-143005.docx
+; Mist_AA_Demo_Report_20261119-143005.docx
 ; Word report with QR codes for every portal (written by each build).
-report = Mist_Access_Assurance_Demo_Report.docx
+report = Mist_AA_Demo_Report.docx
 ; Everything shown on screen, with a time on each line (written by every run;
 ; the name also says build, dry-run or teardown).
-audit_log = Mist_Access_Assurance_Audit.log
+audit_log = Mist_AA_Audit.log
 
 [network]
 ; Optional - for Zscaler / corporate proxies.
